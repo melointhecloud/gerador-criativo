@@ -120,7 +120,9 @@ Variáveis de ambiente no Railway: chave da Gemini API, credenciais do banco e d
 
 ## 10. Riscos e decisões pendentes
 
-### Provider de vídeo (decisão em aberto até o spike)
+### Provider de vídeo
+
+**Decisão do Lucas (2026-11-03): usar o Gemini Omni.** O spike abaixo continua obrigatório, mas como verificação, não como escolha entre providers; quem o executa é o desenvolvedor (Guilherme), com a chave Gemini fornecida pelo Lucas.
 
 A decisão original foi "Veo 3 via Gemini". Em 2026-11-03, a documentação oficial (`https://aistudio.google.com/docs/deprecations`) lista `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview` e `veo-3.1-lite-generate-preview` como **desligados em 22/10/2026**, e `veo-3.0-*` em 30/06/2026. O substituto recomendado é `gemini-omni-1.1-flash`, que usa a Interactions API (não mais operações longas de `generateVideos`), aceita 9:16, gera áudio e aceita imagens de referência por tags (`<IMAGE_REF_N>`).
 

@@ -12,7 +12,9 @@ Execute na ordem. Cada plano termina com software testável.
 
 ## Atenção antes de começar
 
-A **Task 3 do Plano 1** (spike) valida se o provider de vídeo atende ao produto. O Veo 3.x preview da Gemini API foi desligado em 22/10/2026; o substituto (`gemini-omni-1.1-flash`) só documenta fala em vídeo ao *estender* um vídeo anterior. Se a fala numa única geração falhar no spike, **pare e decida com o dono do projeto** antes da Task 11 do Plano 2. Os Planos 1 e 2 (até a Task 10) e o Plano 3 não dependem do resultado: usam providers falsos.
+O provider de vídeo é o **Gemini Omni** (`gemini-omni-1.1-flash`), decisão do Lucas em 2026-11-03: o Veo 3.x preview foi desligado em 22/10/2026. A **Task 3 do Plano 1** (spike) verifica se o Omni atende ao produto; ela gasta crédito da Gemini e deve ser executada pelo desenvolvedor com a chave fornecida pelo Lucas. A documentação só garante fala em vídeo ao *estender* um vídeo anterior. Se a fala numa única geração falhar no spike, **pare e decida com o Lucas** antes da Task 11 do Plano 2.
+
+Para começar, veja `docs/KICKOFF.md` e `CLAUDE.md`. Os Planos 1 e 2 (até a Task 10) e o Plano 3 não dependem do resultado: usam providers falsos.
 
 ## Como executar
 
