@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.env
+.env.local
+storage-data/
+spike-out/
+*.tsbuildinfo
+next-env.d.ts
