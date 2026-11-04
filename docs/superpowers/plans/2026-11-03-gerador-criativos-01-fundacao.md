@@ -82,6 +82,7 @@ Expected: instalação sem erro; `package.json` ganha `dependencies` e `devDepen
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["dom", "dom.iterable", "ES2022"],
+    "types": ["node"],
     "module": "esnext",
     "moduleResolution": "bundler",
     "strict": true,
