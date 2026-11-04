@@ -2392,9 +2392,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { jobs } from "@/db/schema";
 import { PermanentError, RetryLater } from "@/queue/errors";
-import { enqueue } from "@/queue/queue";
+import { claim, enqueue } from "@/queue/queue";
 import { ProviderError } from "@/providers/types";
-import { runOnce, type Handlers } from "@/worker/runner";
+import { recoverStaleJobs, runOnce, type Handlers } from "@/worker/runner";
 import { resetDb, testDb as db } from "../helpers/db";
 
 beforeEach(resetDb);
@@ -2489,6 +2489,19 @@ describe("runOnce", () => {
     await runOnce(db, {});
     expect((await jobOf(j.id)).status).toBe("failed");
   });
+
+  it("recoverStaleJobs devolve à fila os travados e chama onDead nos que esgotaram as tentativas", async () => {
+    const onDead = vi.fn(async () => {});
+    const stuck = await enqueue(db, "assemble", { projectId: "p1" }, { maxAttempts: 1 });
+    await enqueue(db, "generate_scene", {});
+    await claim(db);
+    await claim(db);
+    await db.update(jobs).set({ lockedAt: new Date(Date.now() - 20 * 60_000) });
+    const r = await recoverStaleJobs(db, { assemble: { run: async () => {}, onDead } }, 10 * 60_000);
+    expect(r).toEqual({ requeued: 1, dead: 1 });
+    expect(onDead).toHaveBeenCalledWith({ projectId: "p1" }, "Job travado: tentativas esgotadas");
+    expect((await jobOf(stuck.id)).status).toBe("failed");
+  });
 });
 ```
 
@@ -2502,7 +2515,7 @@ Expected: FAIL — módulo não encontrado.
 ```ts
 import type { Db } from "@/db/client";
 import { PermanentError, RetryLater } from "@/queue/errors";
-import { claim, complete, fail, release } from "@/queue/queue";
+import { claim, complete, fail, reclaimStale, release } from "@/queue/queue";
 import { ProviderError } from "@/providers/types";
 
 export type Handler = {
@@ -2543,6 +2556,20 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
   }
   return true;
 }
+
+// Jobs `running` travados (worker caiu): os que esgotaram as tentativas viram `failed` e
+// recebem o mesmo `onDead` do caminho normal, para limpar as linhas de domínio.
+export async function recoverStaleJobs(db: Db, handlers: Handlers, olderThanMs: number) {
+  const { requeued, dead } = await reclaimStale(db, olderThanMs);
+  for (const job of dead) {
+    try {
+      await handlers[job.type]?.onDead?.(job.payload, job.error ?? "Job travado: tentativas esgotadas");
+    } catch (err) {
+      console.error(`onDead falhou para o job ${job.id}:`, err);
+    }
+  }
+  return { requeued, dead: dead.length };
+}
 ```
 
 - [ ] **Step 4: Implementar `src/worker/handlers.ts`**
@@ -2581,10 +2608,9 @@ import { loadEnv } from "@/config/env";
 import { createDb } from "@/db/client";
 import type { Deps } from "@/deps";
 import { createProviders } from "@/providers";
-import { reclaimStale } from "@/queue/queue";
 import { createStorage } from "@/storage";
 import { buildHandlers } from "./handlers";
-import { runOnce } from "./runner";
+import { recoverStaleJobs, runOnce } from "./runner";
 
 const env = loadEnv();
 const { db } = createDb(env.DATABASE_URL, env.WORKER_CONCURRENCY + 2);
@@ -2616,11 +2642,14 @@ async function loop(n: number) {
   }
 }
 
-// Jobs presos em "running" por um worker que morreu voltam para a fila (rodar uma única réplica do worker).
+// Jobs presos em "running" por um worker que morreu voltam para a fila, ou falham com onDead se esgotaram as tentativas (rodar uma única réplica do worker).
 const reclaimTimer = setInterval(() => {
-  reclaimStale(db, 10 * 60_000)
-    .then((count) => count && console.log(`${count} job(s) travado(s) devolvido(s) à fila`))
-    .catch((e) => console.error("reclaimStale:", e));
+  recoverStaleJobs(db, handlers, 10 * 60_000)
+    .then(({ requeued, dead }) => {
+      if (requeued) console.log(`${requeued} job(s) travado(s) devolvido(s) à fila`);
+      if (dead) console.log(`${dead} job(s) travado(s) marcado(s) como failed (onDead executado)`);
+    })
+    .catch((e) => console.error("recoverStaleJobs:", e));
 }, 60_000);
 
 console.log(`worker iniciado (provider=${env.PROVIDER}, concorrência=${env.WORKER_CONCURRENCY})`);
@@ -2632,7 +2661,7 @@ process.exit(0);
 - [ ] **Step 6: Rodar os testes do runner**
 
 Run: `pnpm vitest run tests/worker/runner.test.ts`
-Expected: 7 testes PASS.
+Expected: 8 testes PASS.
 
 - [ ] **Step 7: Commit**
 

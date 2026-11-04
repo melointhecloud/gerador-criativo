@@ -82,6 +82,7 @@ Expected: instalação sem erro; `package.json` ganha `dependencies` e `devDepen
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["dom", "dom.iterable", "ES2022"],
+    "types": ["node"],
     "module": "esnext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -93,8 +94,7 @@ Expected: instalação sem erro; `package.json` ganha `dependencies` e `devDepen
     "jsx": "preserve",
     "incremental": true,
     "noEmit": true,
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] },
+    "paths": { "@/*": ["./src/*"] },
     "plugins": [{ "name": "next" }]
   },
   "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "scripts/**/*.ts", ".next/types/**/*.ts"],
@@ -106,15 +106,23 @@ Expected: instalação sem erro; `package.json` ganha `dependencies` e `devDepen
 
 ```ts
 import { defineConfig } from "vitest/config";
+import { existsSync, readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
 import path from "node:path";
 
+// O vitest não carrega o .env em process.env; lê só TEST_DATABASE_URL de lá (o ambiente real tem prioridade).
+// (Usa util.parseEnv do Node em vez de loadEnv do Vite, que o pnpm não expõe sem o `vite` como dependência direta.)
+const dotenv = existsSync(".env") ? parseEnv(readFileSync(".env", "utf8")) : {};
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? dotenv.TEST_DATABASE_URL;
+
 export default defineConfig({
-  resolve: { alias: { "@": path.resolve(__dirname, "src") } },
+  resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
     fileParallelism: false,
     testTimeout: 20000,
+    env: TEST_DATABASE_URL ? { TEST_DATABASE_URL } : {},
   },
 });
 ```
@@ -135,8 +143,11 @@ next-env.d.ts
 - [ ] **Step 7: Criar `.env.example`**
 
 ```
-# Banco (dev). Testes usam TEST_DATABASE_URL (default no código).
+# Banco (dev).
 DATABASE_URL=postgres://postgres:postgres@localhost:5433/gerador
+# Banco dos testes (o vitest lê esta variável do .env; default no código usa 5433).
+# Se usar POSTGRES_PORT diferente, descomente e ajuste a porta.
+# TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/gerador_test
 
 # gemini | fake (fake = sem custo, para desenvolver UI e fluxo)
 PROVIDER=fake
@@ -177,13 +188,15 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: gerador_test
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
 volumes:
   pgdata:
 ```
+
+Se a porta 5433 do host já estiver ocupada, defina `POSTGRES_PORT` (ex.: `POSTGRES_PORT=5434 docker compose up -d`) e ajuste `DATABASE_URL`/`TEST_DATABASE_URL` para a mesma porta.
 
 `docker/init.sql`:
 ```sql
@@ -278,6 +291,7 @@ import { z } from "zod";
 
 const baseSchema = z.object({
   DATABASE_URL: z.string().min(1),
+  // Default "gemini" de propósito: em produção falha fechado (exige chave); o .env.example usa fake para dev.
   PROVIDER: z.enum(["gemini", "fake"]).default("gemini"),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_TEXT_MODEL: z.string().optional(),
@@ -739,7 +753,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error("DATABASE_URL não definido");
 
-const sql = postgres(url, { max: 1 });
+const sql = postgres(url, { max: 1, onnotice: () => {} });
 await migrate(drizzle(sql), { migrationsFolder: "drizzle" });
 await sql.end();
 console.log("migrações aplicadas");
@@ -774,7 +788,7 @@ export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5433/gerador_test";
 
 export default async function setup() {
-  const sql = postgres(TEST_DATABASE_URL, { max: 1 });
+  const sql = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
   await migrate(drizzle(sql), { migrationsFolder: "drizzle" });
   await sql.end();
 }
@@ -798,7 +812,7 @@ export async function resetDb() {
 }
 ```
 
-Modificar `vitest.config.ts`: adicionar `globalSetup: ["tests/helpers/global-setup.ts"],` dentro de `test`.
+Modificar `vitest.config.ts`: adicionar `globalSetup: ["tests/helpers/global-setup.ts"],` dentro de `test` (após `testTimeout`).
 
 - [ ] **Step 5: Escrever o teste de schema**
 
@@ -1262,7 +1276,7 @@ export class FsStorage implements Storage {
     return full;
   }
 
-  async put(key: string, bytes: Buffer): Promise<void> {
+  async put(key: string, bytes: Buffer, _contentType: string): Promise<void> {
     const full = this.resolve(key);
     await mkdir(path.dirname(full), { recursive: true });
     await writeFile(full, bytes);
@@ -1448,8 +1462,26 @@ describe("queue", () => {
     await enqueue(db, "assemble", {});
     const job = (await claim(db))!;
     await db.update(jobs).set({ lockedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(jobs.id, job.id));
-    expect(await reclaimStale(db, 10 * 60_000)).toBe(1);
+    const r = await reclaimStale(db, 10 * 60_000);
+    expect(r.requeued).toBe(1);
+    expect(r.dead).toEqual([]);
     expect((await get(job.id)).status).toBe("queued");
+  });
+
+  it("reclaimStale marca como failed o job travado que esgotou as tentativas", async () => {
+    await enqueue(db, "assemble", {}, { maxAttempts: 1 });
+    const job = (await claim(db))!;
+    await db.update(jobs).set({ lockedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(jobs.id, job.id));
+    const r = await reclaimStale(db, 10 * 60_000);
+    expect(r.requeued).toBe(0);
+    expect(r.dead).toHaveLength(1);
+    expect(r.dead[0]!.id).toBe(job.id);
+    expect(r.dead[0]!.status).toBe("failed");
+    expect(r.dead[0]!.error).toBe("Job travado: tentativas esgotadas");
+    const after = await get(job.id);
+    expect(after.status).toBe("failed");
+    expect(after.lockedAt).toBeNull();
+    expect(after.error).toBeTruthy();
   });
 
   it("backoff cresce e tem teto", () => {
@@ -1468,7 +1500,7 @@ Expected: FAIL — módulo não encontrado.
 - [ ] **Step 4: Implementar `src/queue/queue.ts`**
 
 ```ts
-import { and, eq, lt, lte } from "drizzle-orm";
+import { and, eq, gte, lt, lte } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { jobs } from "@/db/schema";
 
@@ -1544,13 +1576,28 @@ export async function fail(db: Db, job: Job, message: string, retryable: boolean
   return "dead";
 }
 
-export async function reclaimStale(db: Db, olderThanMs: number): Promise<number> {
-  const rows = await db
-    .update(jobs)
-    .set({ status: "queued", lockedAt: null })
-    .where(and(eq(jobs.status, "running"), lt(jobs.lockedAt, new Date(Date.now() - olderThanMs))))
-    .returning({ id: jobs.id });
-  return rows.length;
+/**
+ * Trata jobs `running` travados (worker caiu ou travou). Os que já esgotaram as
+ * tentativas viram `failed` e são devolvidos em `dead` (para o chamador limpar as linhas
+ * de domínio via `onDead`); os demais voltam para a fila (`requeued` conta quantos).
+ */
+export async function reclaimStale(db: Db, olderThanMs: number): Promise<{ requeued: number; dead: Job[] }> {
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const stale = and(eq(jobs.status, "running"), lt(jobs.lockedAt, cutoff));
+  return db.transaction(async (tx) => {
+    // Primeiro os esgotados, para os dois conjuntos serem disjuntos.
+    const dead = await tx
+      .update(jobs)
+      .set({ status: "failed", lockedAt: null, error: "Job travado: tentativas esgotadas" })
+      .where(and(stale, gte(jobs.attempts, jobs.maxAttempts)))
+      .returning();
+    const rows = await tx
+      .update(jobs)
+      .set({ status: "queued", lockedAt: null })
+      .where(stale)
+      .returning({ id: jobs.id });
+    return { requeued: rows.length, dead };
+  });
 }
 ```
 
