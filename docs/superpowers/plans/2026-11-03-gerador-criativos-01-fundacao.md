@@ -1262,7 +1262,7 @@ export class FsStorage implements Storage {
     return full;
   }
 
-  async put(key: string, bytes: Buffer): Promise<void> {
+  async put(key: string, bytes: Buffer, _contentType: string): Promise<void> {
     const full = this.resolve(key);
     await mkdir(path.dirname(full), { recursive: true });
     await writeFile(full, bytes);
