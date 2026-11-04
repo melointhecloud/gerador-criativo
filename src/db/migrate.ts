@@ -5,7 +5,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error("DATABASE_URL não definido");
 
-const sql = postgres(url, { max: 1 });
+const sql = postgres(url, { max: 1, onnotice: () => {} });
 await migrate(drizzle(sql), { migrationsFolder: "drizzle" });
 await sql.end();
 console.log("migrações aplicadas");

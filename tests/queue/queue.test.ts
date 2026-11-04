@@ -72,7 +72,9 @@ describe("queue", () => {
     await enqueue(db, "assemble", {});
     const job = (await claim(db))!;
     await db.update(jobs).set({ lockedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(jobs.id, job.id));
-    expect(await reclaimStale(db, 10 * 60_000)).toBe(1);
+    const r = await reclaimStale(db, 10 * 60_000);
+    expect(r.requeued).toBe(1);
+    expect(r.dead).toEqual([]);
     expect((await get(job.id)).status).toBe("queued");
   });
 
@@ -80,7 +82,12 @@ describe("queue", () => {
     await enqueue(db, "assemble", {}, { maxAttempts: 1 });
     const job = (await claim(db))!;
     await db.update(jobs).set({ lockedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(jobs.id, job.id));
-    expect(await reclaimStale(db, 10 * 60_000)).toBe(0);
+    const r = await reclaimStale(db, 10 * 60_000);
+    expect(r.requeued).toBe(0);
+    expect(r.dead).toHaveLength(1);
+    expect(r.dead[0]!.id).toBe(job.id);
+    expect(r.dead[0]!.status).toBe("failed");
+    expect(r.dead[0]!.error).toBe("Job travado: tentativas esgotadas");
     const after = await get(job.id);
     expect(after.status).toBe("failed");
     expect(after.lockedAt).toBeNull();

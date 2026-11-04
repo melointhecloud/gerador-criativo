@@ -76,22 +76,24 @@ export async function fail(db: Db, job: Job, message: string, retryable: boolean
 
 /**
  * Trata jobs `running` travados (worker caiu ou travou). Os que já esgotaram as
- * tentativas viram `failed`; os demais voltam para a fila. Devolve quantos voltaram à fila.
+ * tentativas viram `failed` e são devolvidos em `dead` (para o chamador limpar as linhas
+ * de domínio via `onDead`); os demais voltam para a fila (`requeued` conta quantos).
  */
-export async function reclaimStale(db: Db, olderThanMs: number): Promise<number> {
+export async function reclaimStale(db: Db, olderThanMs: number): Promise<{ requeued: number; dead: Job[] }> {
   const cutoff = new Date(Date.now() - olderThanMs);
   const stale = and(eq(jobs.status, "running"), lt(jobs.lockedAt, cutoff));
   return db.transaction(async (tx) => {
     // Primeiro os esgotados, para os dois conjuntos serem disjuntos.
-    await tx
+    const dead = await tx
       .update(jobs)
       .set({ status: "failed", lockedAt: null, error: "Job travado: tentativas esgotadas" })
-      .where(and(stale, gte(jobs.attempts, jobs.maxAttempts)));
+      .where(and(stale, gte(jobs.attempts, jobs.maxAttempts)))
+      .returning();
     const rows = await tx
       .update(jobs)
       .set({ status: "queued", lockedAt: null })
       .where(stale)
       .returning({ id: jobs.id });
-    return rows.length;
+    return { requeued: rows.length, dead };
   });
 }

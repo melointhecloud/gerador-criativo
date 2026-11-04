@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const baseSchema = z.object({
   DATABASE_URL: z.string().min(1),
+  // Default "gemini" de propósito: em produção falha fechado (exige chave); o .env.example usa fake para dev.
   PROVIDER: z.enum(["gemini", "fake"]).default("gemini"),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_TEXT_MODEL: z.string().optional(),
