@@ -177,13 +177,15 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: gerador_test
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
 volumes:
   pgdata:
 ```
+
+Se a porta 5433 do host já estiver ocupada, defina `POSTGRES_PORT` (ex.: `POSTGRES_PORT=5434 docker compose up -d`) e ajuste `DATABASE_URL`/`TEST_DATABASE_URL` para a mesma porta.
 
 `docker/init.sql`:
 ```sql
