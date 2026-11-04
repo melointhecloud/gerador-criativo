@@ -93,8 +93,7 @@ Expected: instalação sem erro; `package.json` ganha `dependencies` e `devDepen
     "jsx": "preserve",
     "incremental": true,
     "noEmit": true,
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] },
+    "paths": { "@/*": ["./src/*"] },
     "plugins": [{ "name": "next" }]
   },
   "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "scripts/**/*.ts", ".next/types/**/*.ts"],

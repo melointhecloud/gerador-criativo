@@ -6,3 +6,4 @@ storage-data/
 spike-out/
 *.tsbuildinfo
 next-env.d.ts
+.superpowers/
