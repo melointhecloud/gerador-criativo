@@ -76,6 +76,17 @@ describe("queue", () => {
     expect((await get(job.id)).status).toBe("queued");
   });
 
+  it("reclaimStale marca como failed o job travado que esgotou as tentativas", async () => {
+    await enqueue(db, "assemble", {}, { maxAttempts: 1 });
+    const job = (await claim(db))!;
+    await db.update(jobs).set({ lockedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(jobs.id, job.id));
+    expect(await reclaimStale(db, 10 * 60_000)).toBe(0);
+    const after = await get(job.id);
+    expect(after.status).toBe("failed");
+    expect(after.lockedAt).toBeNull();
+    expect(after.error).toBeTruthy();
+  });
+
   it("backoff cresce e tem teto", () => {
     expect(backoffMs(1)).toBe(5_000);
     expect(backoffMs(2)).toBe(10_000);

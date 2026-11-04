@@ -1,4 +1,4 @@
-import { and, eq, lt, lte } from "drizzle-orm";
+import { and, eq, gte, lt, lte } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { jobs } from "@/db/schema";
 
@@ -74,11 +74,24 @@ export async function fail(db: Db, job: Job, message: string, retryable: boolean
   return "dead";
 }
 
+/**
+ * Trata jobs `running` travados (worker caiu ou travou). Os que já esgotaram as
+ * tentativas viram `failed`; os demais voltam para a fila. Devolve quantos voltaram à fila.
+ */
 export async function reclaimStale(db: Db, olderThanMs: number): Promise<number> {
-  const rows = await db
-    .update(jobs)
-    .set({ status: "queued", lockedAt: null })
-    .where(and(eq(jobs.status, "running"), lt(jobs.lockedAt, new Date(Date.now() - olderThanMs))))
-    .returning({ id: jobs.id });
-  return rows.length;
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const stale = and(eq(jobs.status, "running"), lt(jobs.lockedAt, cutoff));
+  return db.transaction(async (tx) => {
+    // Primeiro os esgotados, para os dois conjuntos serem disjuntos.
+    await tx
+      .update(jobs)
+      .set({ status: "failed", lockedAt: null, error: "Job travado: tentativas esgotadas" })
+      .where(and(stale, gte(jobs.attempts, jobs.maxAttempts)));
+    const rows = await tx
+      .update(jobs)
+      .set({ status: "queued", lockedAt: null })
+      .where(stale)
+      .returning({ id: jobs.id });
+    return rows.length;
+  });
 }
