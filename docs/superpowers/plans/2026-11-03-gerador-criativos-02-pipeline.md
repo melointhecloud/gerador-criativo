@@ -320,6 +320,14 @@ describe("draftScript", () => {
     expect(call.system).toContain("2 referências");
   });
 
+  it("instrui o modelo a priorizar quem aparece em destaque quando excede o limite", async () => {
+    const text = new FakeTextModel([{ scenes: [scene()] }]);
+    await draftScript(text, base);
+    const sys = text.calls[0]!.system;
+    expect(sys).toContain("em destaque");
+    expect(sys).toContain("só os primeiros serão usados");
+  });
+
   it("modo ugc usa instruções de UGC", async () => {
     const text = new FakeTextModel([{ scenes: [scene({ referenceLabels: [] })] }]);
     await draftScript(text, { ...base, mode: "ugc" });
@@ -405,7 +413,7 @@ function buildSystem(i: DraftInput): string {
     "Divida a copy recebida em cenas sequenciais que, juntas, contam a copy inteira, sem inventar ofertas, preços ou promessas que não estejam nela.",
     `Cada cena dura entre 3 e ${i.maxSeconds} segundos (${i.maxSeconds} segundos é o máximo). O campo dialogue é a fala exata, em português do Brasil, que será dita na cena (vazio se não houver fala). Cabem cerca de 2,5 palavras por segundo.`,
     "O campo visualPrompt descreve ação, enquadramento, cenário e luz. Não descreva a aparência física de pessoas ou do produto: imagens de referência definem isso.",
-    `O campo referenceLabels só pode conter rótulos da lista de referências disponíveis, e no máximo ${i.maxReferences} referências por cena.`,
+    `O campo referenceLabels só pode conter rótulos da lista de referências disponíveis, e no máximo ${i.maxReferences} referências por cena. Se a cena tiver mais personagens do que o limite, liste primeiro os que aparecem em destaque (quem fala ou ocupa o primeiro plano); só os primeiros serão usados.`,
     "O primeiro segundo da primeira cena deve prender a atenção (gancho). A última cena fecha com a chamada para ação da copy.",
   ].join("\n");
 }
@@ -464,7 +472,7 @@ export async function draftScript(text: TextModel, input: DraftInput): Promise<D
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/script-planner.test.ts`
-Expected: 7 testes PASS.
+Expected: 8 testes PASS.
 
 - [ ] **Step 5: Commit**
 

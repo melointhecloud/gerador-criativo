@@ -34,7 +34,7 @@ function buildSystem(i: DraftInput): string {
     "Divida a copy recebida em cenas sequenciais que, juntas, contam a copy inteira, sem inventar ofertas, preços ou promessas que não estejam nela.",
     `Cada cena dura entre 3 e ${i.maxSeconds} segundos (${i.maxSeconds} segundos é o máximo). O campo dialogue é a fala exata, em português do Brasil, que será dita na cena (vazio se não houver fala). Cabem cerca de 2,5 palavras por segundo.`,
     "O campo visualPrompt descreve ação, enquadramento, cenário e luz. Não descreva a aparência física de pessoas ou do produto: imagens de referência definem isso.",
-    `O campo referenceLabels só pode conter rótulos da lista de referências disponíveis, e no máximo ${i.maxReferences} referências por cena.`,
+    `O campo referenceLabels só pode conter rótulos da lista de referências disponíveis, e no máximo ${i.maxReferences} referências por cena. Se a cena tiver mais personagens do que o limite, liste primeiro os que aparecem em destaque (quem fala ou ocupa o primeiro plano); só os primeiros serão usados.`,
     "O primeiro segundo da primeira cena deve prender a atenção (gancho). A última cena fecha com a chamada para ação da copy.",
   ].join("\n");
 }

@@ -43,6 +43,14 @@ describe("draftScript", () => {
     expect(call.system).toContain("2 referências");
   });
 
+  it("instrui o modelo a priorizar quem aparece em destaque quando excede o limite", async () => {
+    const text = new FakeTextModel([{ scenes: [scene()] }]);
+    await draftScript(text, base);
+    const sys = text.calls[0]!.system;
+    expect(sys).toContain("em destaque");
+    expect(sys).toContain("só os primeiros serão usados");
+  });
+
   it("modo ugc usa instruções de UGC", async () => {
     const text = new FakeTextModel([{ scenes: [scene({ referenceLabels: [] })] }]);
     await draftScript(text, { ...base, mode: "ugc" });
