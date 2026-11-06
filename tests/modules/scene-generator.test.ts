@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { assets, projects, sceneAttempts } from "@/db/schema";
-import { handleGenerateScene, onGenerateSceneDead } from "@/modules/scene-generator";
+import { handleGenerateScene, MAX_GENERATION_WAIT_MS, onGenerateSceneDead } from "@/modules/scene-generator";
 import { PermanentError, RetryLater } from "@/queue/errors";
 import { ProviderError } from "@/providers/types";
 import { makeDeps } from "../helpers/deps";
@@ -93,6 +93,49 @@ describe("handleGenerateScene", () => {
     await expect(
       handleGenerateScene(m.deps, { attemptId: "00000000-0000-0000-0000-000000000000" }),
     ).rejects.toBeInstanceOf(PermanentError);
+  });
+});
+
+describe("teto de espera por geração pendente", () => {
+  const ageAttempt = (id: string, ms: number) =>
+    db.update(sceneAttempts).set({ createdAt: new Date(Date.now() - ms) }).where(eq(sceneAttempts.id, id));
+
+  it("passou do teto: falha com mensagem de tempo esgotado, sem retry, e avança o projeto", async () => {
+    const { m, p, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    await ageAttempt(attempt.id, MAX_GENERATION_WAIT_MS + 60_000);
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).resolves.toBeUndefined();
+    const a = await attemptOf(attempt.id);
+    expect(a.status).toBe("failed");
+    expect(a.error).toContain("tempo esgotado");
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+  });
+
+  it("dentro do teto: continua pedindo para voltar", async () => {
+    const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    await ageAttempt(attempt.id, MAX_GENERATION_WAIT_MS - 5 * 60_000);
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+    expect((await attemptOf(attempt.id)).status).toBe("generating");
+  });
+});
+
+describe("conclusões simultâneas no mesmo projeto", () => {
+  it("duas tentativas terminando ao mesmo tempo: o projeto vai para revisão", async () => {
+    const { m } = await setup();
+    // A corrida depende de timing: repete com projetos novos para o teste falhar de forma confiável sem o lock.
+    for (let round = 0; round < 8; round++) {
+      const p = await seedProject(db, { stage: "generating" });
+      const s1 = await seedScene(db, p.id, 0, {});
+      const s2 = await seedScene(db, p.id, 1, {});
+      const a1 = await seedAttempt(db, s1.id, { prompt: "cena 1" });
+      const a2 = await seedAttempt(db, s2.id, { prompt: "cena 2" });
+      await Promise.all([
+        handleGenerateScene(m.deps, { attemptId: a1.id }),
+        handleGenerateScene(m.deps, { attemptId: a2.id }),
+      ]);
+      expect((await attemptOf(a1.id)).status).toBe("done");
+      expect((await attemptOf(a2.id)).status).toBe("done");
+      expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+    }
   });
 });
 

@@ -1727,7 +1727,7 @@ git commit -m "feat(services): script planning, scene attempts, approval and ass
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { assets, projects, sceneAttempts } from "@/db/schema";
-import { handleGenerateScene, onGenerateSceneDead } from "@/modules/scene-generator";
+import { handleGenerateScene, MAX_GENERATION_WAIT_MS, onGenerateSceneDead } from "@/modules/scene-generator";
 import { PermanentError, RetryLater } from "@/queue/errors";
 import { ProviderError } from "@/providers/types";
 import { makeDeps } from "../helpers/deps";
@@ -1822,6 +1822,49 @@ describe("handleGenerateScene", () => {
   });
 });
 
+describe("teto de espera por geração pendente", () => {
+  const ageAttempt = (id: string, ms: number) =>
+    db.update(sceneAttempts).set({ createdAt: new Date(Date.now() - ms) }).where(eq(sceneAttempts.id, id));
+
+  it("passou do teto: falha com mensagem de tempo esgotado, sem retry, e avança o projeto", async () => {
+    const { m, p, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    await ageAttempt(attempt.id, MAX_GENERATION_WAIT_MS + 60_000);
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).resolves.toBeUndefined();
+    const a = await attemptOf(attempt.id);
+    expect(a.status).toBe("failed");
+    expect(a.error).toContain("tempo esgotado");
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+  });
+
+  it("dentro do teto: continua pedindo para voltar", async () => {
+    const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    await ageAttempt(attempt.id, MAX_GENERATION_WAIT_MS - 5 * 60_000);
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+    expect((await attemptOf(attempt.id)).status).toBe("generating");
+  });
+});
+
+describe("conclusões simultâneas no mesmo projeto", () => {
+  it("duas tentativas terminando ao mesmo tempo: o projeto vai para revisão", async () => {
+    const { m } = await setup();
+    // A corrida depende de timing: repete com projetos novos para o teste falhar de forma confiável sem o lock.
+    for (let round = 0; round < 8; round++) {
+      const p = await seedProject(db, { stage: "generating" });
+      const s1 = await seedScene(db, p.id, 0, {});
+      const s2 = await seedScene(db, p.id, 1, {});
+      const a1 = await seedAttempt(db, s1.id, { prompt: "cena 1" });
+      const a2 = await seedAttempt(db, s2.id, { prompt: "cena 2" });
+      await Promise.all([
+        handleGenerateScene(m.deps, { attemptId: a1.id }),
+        handleGenerateScene(m.deps, { attemptId: a2.id }),
+      ]);
+      expect((await attemptOf(a1.id)).status).toBe("done");
+      expect((await attemptOf(a2.id)).status).toBe("done");
+      expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+    }
+  });
+});
+
 describe("onGenerateSceneDead", () => {
   it("marca a tentativa como failed e avança o projeto", async () => {
     const { m, p, attempt } = await setup();
@@ -1873,7 +1916,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import type { DbOrTx } from "@/db/client";
-import { assets, sceneAttempts, scenes, type AttemptStatus } from "@/db/schema";
+import { assets, projects, sceneAttempts, scenes, type AttemptStatus } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { PermanentError, RetryLater } from "@/queue/errors";
 import { ProviderError, type ReferenceImage } from "@/providers/types";
@@ -1881,6 +1924,8 @@ import { advanceToReviewIfIdle } from "@/services/projects";
 import { probe, withTempDir } from "./ffmpeg";
 
 const POLL_DELAY_MS = 10_000;
+// Teto de espera por uma geração que continua "pending": passou disso, a tentativa falha e a cena pode ser regerada.
+export const MAX_GENERATION_WAIT_MS = 30 * 60_000;
 const TERMINAL: AttemptStatus[] = ["done", "failed", "blocked"];
 
 type AttemptPatch = Partial<typeof sceneAttempts.$inferInsert>;
@@ -1909,9 +1954,17 @@ async function loadReferences(deps: Deps, assetIds: string[]): Promise<Reference
   return out;
 }
 
+// Serializa, por projeto, as transações que encerram uma tentativa e checam ociosidade. Sem isso, em READ COMMITTED
+// duas tentativas terminando juntas veem uma à outra ainda "generating" e ninguém avança o projeto para revisão.
+// Ordem de locks: linha do projeto primeiro, depois a da tentativa.
+async function lockProject(tx: DbOrTx, projectId: string) {
+  await tx.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId)).for("update");
+}
+
 // Marca a tentativa como finalizada e, se não sobrou nada em andamento, avança o projeto — tudo atômico.
 async function finish(deps: Deps, projectId: string, attemptId: string, patch: AttemptPatch) {
   await deps.db.transaction(async (tx) => {
+    await lockProject(tx, projectId);
     await patchAttempt(tx, attemptId, patch);
     await advanceToReviewIfIdle(tx, projectId);
   });
@@ -1940,7 +1993,16 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
     }
 
     const result = await providers.video.poll({ providerRef });
-    if (result.state === "pending") throw new RetryLater(POLL_DELAY_MS);
+    if (result.state === "pending") {
+      if (Date.now() - attempt.createdAt.getTime() > MAX_GENERATION_WAIT_MS) {
+        await finish(deps, scene.projectId, attempt.id, {
+          status: "failed",
+          error: "A geração demorou mais de 30 minutos e foi interrompida (tempo esgotado). Regere a cena.",
+        });
+        return;
+      }
+      throw new RetryLater(POLL_DELAY_MS);
+    }
 
     if (result.state === "failed") {
       if (result.retryable) {
@@ -1960,6 +2022,7 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
     await storage.put(key, result.bytes, "video/mp4");
     // Asset + status + avanço de etapa numa transação: reexecutar não duplica clipe.
     await db.transaction(async (tx) => {
+      await lockProject(tx, scene.projectId);
       const [clip] = await tx
         .insert(assets)
         .values({
