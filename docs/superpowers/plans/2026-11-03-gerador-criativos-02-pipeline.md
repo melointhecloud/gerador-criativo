@@ -397,7 +397,7 @@ function buildSystem(i: DraftInput): string {
     i.mode === "ugc"
       ? "O criativo é UGC: uma pessoa real falando para a câmera, filmada com celular na vertical. " +
         "Todas as cenas são trechos do mesmo vídeo, com a mesma pessoa e o mesmo cenário, em tom natural e direto."
-      : "O criativo é uma novelinha: uma história dramática curta, com diálogos entre personagens. " +
+      : "O criativo é uma novela curta (novelinha): uma história dramática, com diálogos entre personagens. " +
         "Cada cena avança a história. Liste em referenceLabels todos os personagens que aparecem na cena.";
   return [
     "Você é diretor de criativos de vídeo para TikTok Ads, escrevendo em português do Brasil.",
