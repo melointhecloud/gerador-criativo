@@ -798,13 +798,13 @@ export async function seedAttempt(
 - [ ] **Step 3: Criar `src/services/labels.ts`**
 
 ```ts
-import { and, eq, isNotNull, ne } from "drizzle-orm";
+import type { DbOrTx } from "@/db/client";
 import type { Db } from "@/db/client";
 import { assets, characters } from "@/db/schema";
 import { DomainError } from "./errors";
 
 // Rótulos identificam imagens de referência e personagens no roteiro; precisam ser únicos no projeto.
-export async function assertLabelFree(db: Db, projectId: string, label: string, exceptCharacterId?: string) {
+export async function assertLabelFree(db: DbOrTx, projectId: string, label: string, exceptCharacterId?: string) {
   const key = label.trim().toLowerCase();
   const refs = await db
     .select({ label: assets.label })
@@ -2097,6 +2097,7 @@ import {
 } from "@/services/characters";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
+import { ProviderError } from "@/providers/types";
 import { seedAsset, seedCharacter, seedProject } from "../helpers/seed";
 
 beforeEach(resetDb);
@@ -2187,6 +2188,56 @@ describe("CRUD", () => {
     expect((await charOf(c.id)).imageStatus).toBe("pending");
     expect(await db.select().from(jobs)).toHaveLength(1);
   });
+
+  it("regenerateCharacterImage não enfileira de novo enquanto está pending (clique duplo)", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const c = await seedCharacter(db, p.id, { imageStatus: "ready" });
+    const results = await Promise.allSettled([
+      regenerateCharacterImage(m.deps, c.id),
+      regenerateCharacterImage(m.deps, c.id),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await db.select().from(jobs)).toHaveLength(1);
+  });
+
+  it("regenerateCharacterImage recupera um personagem failed", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const c = await seedCharacter(db, p.id, { imageStatus: "failed" });
+    await regenerateCharacterImage(m.deps, c.id);
+    expect((await charOf(c.id)).imageStatus).toBe("pending");
+  });
+
+  it("renomear acompanha o rótulo da imagem e respeita rótulo único", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "Maria" });
+    const c = await seedCharacter(db, p.id, { name: "Maria", imageStatus: "ready", assetId: img.id });
+    await seedCharacter(db, p.id, { name: "Carlos" });
+    await expect(updateCharacter(m.deps, c.id, { name: " carlos " })).rejects.toThrow(/Já existe/);
+    await updateCharacter(m.deps, c.id, { name: "Mariana" });
+    const [a] = await db.select().from(assets).where(eq(assets.id, img.id));
+    expect(a!.label).toBe("Mariana");
+  });
+
+  it("fora da etapa de personagens nada é alterado", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "script" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "A" });
+    const c = await seedCharacter(db, p.id, { name: "A", imageStatus: "ready", assetId: img.id, approved: true });
+    await expect(updateCharacter(m.deps, c.id, { description: "x" })).rejects.toThrow(/personagens/);
+    await expect(regenerateCharacterImage(m.deps, c.id)).rejects.toThrow(/personagens/);
+    await expect(approveCharacter(db, c.id)).rejects.toThrow(/personagens/);
+    await expect(removeCharacter(db, c.id)).rejects.toThrow(/personagens/);
+    await expect(addCharacter(m.deps, p.id, { name: "B", description: "d" })).rejects.toThrow(/personagens/);
+    expect(await db.select().from(jobs)).toHaveLength(0);
+    expect((await charOf(c.id)).assetId).toBe(img.id);
+  });
 });
 
 describe("handleGenerateCharacter", () => {
@@ -2215,6 +2266,62 @@ describe("handleGenerateCharacter", () => {
     expect((await charOf(c.id)).assetId).not.toBe(old.id);
   });
 
+  it("é idempotente: reentrega depois de pronto não gera nem duplica assets", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const c = await seedCharacter(db, p.id, { name: "Maria" });
+    await handleGenerateCharacter(m.deps, { characterId: c.id });
+    await handleGenerateCharacter(m.deps, { characterId: c.id });
+    expect(m.image.calls).toHaveLength(1);
+    expect(await db.select().from(assets)).toHaveLength(1);
+  });
+
+  it("não grava a imagem se a descrição mudou durante a geração", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const c = await seedCharacter(db, p.id, { name: "Maria" });
+    const orig = m.image.generateImage.bind(m.image);
+    m.image.generateImage = async (args) => {
+      await db.update(characters).set({ description: "outra descrição" }).where(eq(characters.id, c.id));
+      return orig(args);
+    };
+    await handleGenerateCharacter(m.deps, { characterId: c.id });
+    expect((await charOf(c.id)).imageStatus).toBe("pending");
+    expect(await db.select().from(assets)).toHaveLength(0);
+  });
+
+  it("erro não retentável do provedor marca failed com o motivo; retentável propaga", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const c = await seedCharacter(db, p.id);
+    m.image.generateImage = async () => {
+      throw new ProviderError("Conteúdo bloqueado", false);
+    };
+    await handleGenerateCharacter(m.deps, { characterId: c.id });
+    expect(await charOf(c.id)).toMatchObject({ imageStatus: "failed", imageError: "Conteúdo bloqueado" });
+
+    const c2 = await seedCharacter(db, p.id, { name: "Outro" });
+    m.image.generateImage = async () => {
+      throw new ProviderError("limite", true);
+    };
+    await expect(handleGenerateCharacter(m.deps, { characterId: c2.id })).rejects.toThrow("limite");
+    expect((await charOf(c2.id)).imageStatus).toBe("pending");
+  });
+
+  it("onGenerateCharacterDead não mexe em personagem pronto nem em personagem removido", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "A" });
+    const c = await seedCharacter(db, p.id, { name: "A", imageStatus: "ready", assetId: img.id });
+    await onGenerateCharacterDead(m.deps, { characterId: c.id }, "x");
+    expect((await charOf(c.id)).imageStatus).toBe("ready");
+    await onGenerateCharacterDead(m.deps, { characterId: "00000000-0000-0000-0000-000000000000" }, "x");
+  });
+
   it("onGenerateCharacterDead marca failed com o motivo", async () => {
     const m = await makeDeps();
     cleanup = m.cleanup;
@@ -2233,9 +2340,9 @@ Expected: FAIL — módulos não encontrados.
 
 - [ ] **Step 3: Acrescentar o handler em `src/modules/character-designer.ts`**
 
-Substituir os imports no topo do arquivo por:
+Substituir os imports no topo do arquivo por (o handler só grava se o personagem ainda está `pending` e a descrição não mudou; reentrega vira no-op; mutações do serviço rodam em transação com lock da linha do projeto e do personagem):
 ```ts
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { assets, characters } from "@/db/schema";
 import type { Deps } from "@/deps";
@@ -2247,16 +2354,17 @@ E acrescentar ao final do arquivo:
 ```ts
 const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
 
+// Idempotente: só gera quando o personagem ainda está "pending" (reentrega depois de queda vira no-op) e só grava
+// se a descrição não mudou durante a geração (nesse caso, o job enfileirado pela edição cuida da imagem nova).
 export async function handleGenerateCharacter(deps: Deps, payload: { characterId: string }): Promise<void> {
   const { db, storage, providers } = deps;
   const [character] = await db.select().from(characters).where(eq(characters.id, payload.characterId));
   if (!character) throw new PermanentError("Personagem não encontrado");
+  if (character.imageStatus !== "pending") return;
 
   let image;
   try {
-    image = await providers.image.generateImage({
-      prompt: buildCharacterImagePrompt(character),
-    });
+    image = await providers.image.generateImage({ prompt: buildCharacterImagePrompt(character) });
   } catch (e) {
     if (e instanceof ProviderError && !e.retryable) {
       await db
@@ -2270,36 +2378,41 @@ export async function handleGenerateCharacter(deps: Deps, payload: { characterId
 
   const key = `projects/${character.projectId}/characters/${character.id}-${Date.now()}.${EXT[image.mimeType] ?? "png"}`;
   await storage.put(key, image.bytes, image.mimeType);
-  const [asset] = await db
-    .insert(assets)
-    .values({
-      projectId: character.projectId,
-      kind: "character",
-      label: character.name,
-      storageKey: key,
-      mimeType: image.mimeType,
-    })
-    .returning();
-  await db
-    .update(characters)
-    .set({ assetId: asset!.id, imageStatus: "ready", imageError: null })
-    .where(eq(characters.id, character.id));
-  if (character.assetId) await db.delete(assets).where(eq(assets.id, character.assetId));
+  await db.transaction(async (tx) => {
+    const [current] = await tx.select().from(characters).where(eq(characters.id, character.id)).for("update");
+    if (!current || current.imageStatus !== "pending" || current.description !== character.description) return;
+    const [asset] = await tx
+      .insert(assets)
+      .values({
+        projectId: current.projectId,
+        kind: "character",
+        label: current.name,
+        storageKey: key,
+        mimeType: image.mimeType,
+      })
+      .returning();
+    await tx
+      .update(characters)
+      .set({ assetId: asset!.id, imageStatus: "ready", imageError: null })
+      .where(eq(characters.id, current.id));
+    if (current.assetId) await tx.delete(assets).where(eq(assets.id, current.assetId));
+  });
 }
 
+// Chamado pelo worker quando o job morre; deixa o personagem em "failed" (recuperável por regerar). No-op se já está pronto.
 export async function onGenerateCharacterDead(deps: Deps, payload: { characterId: string }, message: string) {
   await deps.db
     .update(characters)
     .set({ imageStatus: "failed", imageError: message })
-    .where(eq(characters.id, payload.characterId));
+    .where(and(eq(characters.id, payload.characterId), eq(characters.imageStatus, "pending")));
 }
 ```
 
 - [ ] **Step 4: Implementar `src/services/characters.ts`**
 
 ```ts
-import { and, asc, eq } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import { asc, eq, sql } from "drizzle-orm";
+import type { Db, DbOrTx } from "@/db/client";
 import { assets, characters } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { proposeCharacters } from "@/modules/character-designer";
@@ -2308,26 +2421,33 @@ import { DomainError } from "./errors";
 import { assertLabelFree } from "./labels";
 import { getProject, type Character } from "./projects";
 
-async function assertCharactersStage(db: Db, projectId: string) {
-  const project = await getProject(db, projectId);
+// Etapa válida para mexer em personagens (chamar depois de lockProjectRow dentro de transações).
+async function assertCharactersStage(tx: DbOrTx, projectId: string) {
+  const project = await getProject(tx, projectId);
   if (project.mode !== "novelinha" || project.stage !== "characters") {
     throw new DomainError("Personagens só existem na etapa de personagens de uma novelinha");
   }
   return project;
 }
 
-async function getCharacter(db: Db, id: string): Promise<Character> {
-  const [row] = await db.select().from(characters).where(eq(characters.id, id));
+async function lockProjectRow(tx: DbOrTx, projectId: string) {
+  await tx.execute(sql`select id from projects where id = ${projectId} for update`);
+}
+
+// Trava a linha do personagem (e devolve o estado atual) para serializar cliques repetidos.
+async function lockCharacter(tx: DbOrTx, id: string): Promise<Character> {
+  const [row] = await tx.select().from(characters).where(eq(characters.id, id)).for("update");
   if (!row) throw new DomainError("Personagem não encontrado", 404);
   return row;
 }
 
-async function queueImage(db: Db, characterId: string) {
-  await db
+// Volta o personagem para "pending" e enfileira a imagem; sempre chamado dentro de uma transação.
+async function queueImage(tx: DbOrTx, characterId: string) {
+  await tx
     .update(characters)
     .set({ imageStatus: "pending", imageError: null, approved: false })
     .where(eq(characters.id, characterId));
-  await enqueue(db, "generate_character", { characterId });
+  await enqueue(tx, "generate_character", { characterId });
 }
 
 export async function proposeProjectCharacters(deps: Deps, projectId: string): Promise<void> {
@@ -2335,17 +2455,21 @@ export async function proposeProjectCharacters(deps: Deps, projectId: string): P
   const project = await assertCharactersStage(db, projectId);
   const proposals = await proposeCharacters(providers.text, project.copy);
 
-  const old = await db.select().from(characters).where(eq(characters.projectId, projectId));
-  await db.delete(characters).where(eq(characters.projectId, projectId));
-  for (const c of old) if (c.assetId) await db.delete(assets).where(eq(assets.id, c.assetId));
+  await db.transaction(async (tx) => {
+    await lockProjectRow(tx, projectId);
+    await assertCharactersStage(tx, projectId); // a etapa pode ter mudado durante a chamada ao modelo
+    const old = await tx.select().from(characters).where(eq(characters.projectId, projectId));
+    await tx.delete(characters).where(eq(characters.projectId, projectId));
+    for (const c of old) if (c.assetId) await tx.delete(assets).where(eq(assets.id, c.assetId));
 
-  for (const [position, p] of proposals.entries()) {
-    const [row] = await db
-      .insert(characters)
-      .values({ projectId, name: p.name, description: p.description, position })
-      .returning();
-    await enqueue(db, "generate_character", { characterId: row!.id });
-  }
+    for (const [position, p] of proposals.entries()) {
+      const [row] = await tx
+        .insert(characters)
+        .values({ projectId, name: p.name, description: p.description, position })
+        .returning();
+      await enqueue(tx, "generate_character", { characterId: row!.id });
+    }
+  });
 }
 
 export async function addCharacter(
@@ -2353,18 +2477,25 @@ export async function addCharacter(
   projectId: string,
   input: { name: string; description: string },
 ): Promise<Character> {
-  const { db } = deps;
-  await assertCharactersStage(db, projectId);
   const name = input.name.trim();
-  if (!name || !input.description.trim()) throw new DomainError("Informe nome e descrição do personagem");
-  await assertLabelFree(db, projectId, name);
-  const existing = await db.select().from(characters).where(eq(characters.projectId, projectId)).orderBy(asc(characters.position));
-  const [row] = await db
-    .insert(characters)
-    .values({ projectId, name, description: input.description.trim(), position: existing.length })
-    .returning();
-  await enqueue(db, "generate_character", { characterId: row!.id });
-  return row!;
+  const description = input.description.trim();
+  if (!name || !description) throw new DomainError("Informe nome e descrição do personagem");
+  return deps.db.transaction(async (tx) => {
+    await lockProjectRow(tx, projectId);
+    await assertCharactersStage(tx, projectId);
+    await assertLabelFree(tx, projectId, name);
+    const existing = await tx
+      .select({ id: characters.id })
+      .from(characters)
+      .where(eq(characters.projectId, projectId))
+      .orderBy(asc(characters.position));
+    const [row] = await tx
+      .insert(characters)
+      .values({ projectId, name, description, position: existing.length })
+      .returning();
+    await enqueue(tx, "generate_character", { characterId: row!.id });
+    return row!;
+  });
 }
 
 export async function updateCharacter(
@@ -2372,47 +2503,75 @@ export async function updateCharacter(
   id: string,
   patch: { name?: string; description?: string },
 ): Promise<Character> {
-  const { db } = deps;
-  const current = await getCharacter(db, id);
-  await assertCharactersStage(db, current.projectId);
-  const set: Partial<Character> = { approved: false };
-  if (patch.name !== undefined) {
-    const name = patch.name.trim();
-    if (!name) throw new DomainError("O nome não pode ficar vazio");
-    await assertLabelFree(db, current.projectId, name, id);
-    set.name = name;
-  }
-  const descriptionChanged = patch.description !== undefined && patch.description.trim() !== current.description;
-  if (patch.description !== undefined) {
-    if (!patch.description.trim()) throw new DomainError("A descrição não pode ficar vazia");
-    set.description = patch.description.trim();
-  }
-  const [row] = await db.update(characters).set(set).where(eq(characters.id, id)).returning();
-  if (descriptionChanged) await queueImage(db, id);
-  return row!;
+  return deps.db.transaction(async (tx) => {
+    const [found] = await tx.select({ projectId: characters.projectId }).from(characters).where(eq(characters.id, id));
+    if (!found) throw new DomainError("Personagem não encontrado", 404);
+    await lockProjectRow(tx, found.projectId);
+    await assertCharactersStage(tx, found.projectId);
+    const current = await lockCharacter(tx, id);
+
+    const set: Partial<Character> = { approved: false };
+    if (patch.name !== undefined) {
+      const name = patch.name.trim();
+      if (!name) throw new DomainError("O nome não pode ficar vazio");
+      await assertLabelFree(tx, current.projectId, name, id);
+      set.name = name;
+    }
+    let descriptionChanged = false;
+    if (patch.description !== undefined) {
+      const description = patch.description.trim();
+      if (!description) throw new DomainError("A descrição não pode ficar vazia");
+      descriptionChanged = description !== current.description;
+      set.description = description;
+    }
+    const [row] = await tx.update(characters).set(set).where(eq(characters.id, id)).returning();
+    // O rótulo da imagem acompanha o nome (é por ele que o roteiro cita o personagem).
+    if (set.name !== undefined && current.assetId) {
+      await tx.update(assets).set({ label: set.name }).where(eq(assets.id, current.assetId));
+    }
+    if (descriptionChanged) await queueImage(tx, id);
+    return descriptionChanged ? { ...row!, imageStatus: "pending", imageError: null } : row!;
+  });
 }
 
 export async function regenerateCharacterImage(deps: Deps, id: string): Promise<void> {
-  const current = await getCharacter(deps.db, id);
-  await assertCharactersStage(deps.db, current.projectId);
-  await queueImage(deps.db, id);
+  await deps.db.transaction(async (tx) => {
+    const [found] = await tx.select({ projectId: characters.projectId }).from(characters).where(eq(characters.id, id));
+    if (!found) throw new DomainError("Personagem não encontrado", 404);
+    await lockProjectRow(tx, found.projectId);
+    await assertCharactersStage(tx, found.projectId);
+    const current = await lockCharacter(tx, id);
+    // Geração custa crédito: clique duplo não pode enfileirar duas imagens.
+    if (current.imageStatus === "pending") throw new DomainError("A imagem deste personagem já está sendo gerada");
+    await queueImage(tx, id);
+  });
 }
 
 export async function approveCharacter(db: Db, id: string): Promise<Character> {
-  const current = await getCharacter(db, id);
-  await assertCharactersStage(db, current.projectId);
-  if (current.imageStatus !== "ready" || !current.assetId) {
-    throw new DomainError("Espere a imagem do personagem ficar pronta para aprovar");
-  }
-  const [row] = await db.update(characters).set({ approved: true }).where(eq(characters.id, id)).returning();
-  return row!;
+  return db.transaction(async (tx) => {
+    const [found] = await tx.select({ projectId: characters.projectId }).from(characters).where(eq(characters.id, id));
+    if (!found) throw new DomainError("Personagem não encontrado", 404);
+    await lockProjectRow(tx, found.projectId);
+    await assertCharactersStage(tx, found.projectId);
+    const current = await lockCharacter(tx, id);
+    if (current.imageStatus !== "ready" || !current.assetId) {
+      throw new DomainError("Espere a imagem do personagem ficar pronta para aprovar");
+    }
+    const [row] = await tx.update(characters).set({ approved: true }).where(eq(characters.id, id)).returning();
+    return row!;
+  });
 }
 
 export async function removeCharacter(db: Db, id: string): Promise<void> {
-  const current = await getCharacter(db, id);
-  await assertCharactersStage(db, current.projectId);
-  await db.delete(characters).where(and(eq(characters.id, id)));
-  if (current.assetId) await db.delete(assets).where(eq(assets.id, current.assetId));
+  await db.transaction(async (tx) => {
+    const [found] = await tx.select({ projectId: characters.projectId }).from(characters).where(eq(characters.id, id));
+    if (!found) throw new DomainError("Personagem não encontrado", 404);
+    await lockProjectRow(tx, found.projectId);
+    await assertCharactersStage(tx, found.projectId);
+    const current = await lockCharacter(tx, id);
+    await tx.delete(characters).where(eq(characters.id, id));
+    if (current.assetId) await tx.delete(assets).where(eq(assets.id, current.assetId));
+  });
 }
 ```
 
@@ -2424,7 +2583,7 @@ Expected: todos PASS; typecheck limpo.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/modules/character-designer.ts src/services/characters.ts tests/services/characters.test.ts
+git add src/modules/character-designer.ts src/services/characters.ts src/services/labels.ts tests/services/characters.test.ts
 git commit -m "feat: character service and image generation handler"
 ```
 

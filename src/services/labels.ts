@@ -1,10 +1,10 @@
 import { and, eq, isNotNull, ne } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { DbOrTx } from "@/db/client";
 import { assets, characters } from "@/db/schema";
 import { DomainError } from "./errors";
 
 // Rótulos identificam imagens de referência e personagens no roteiro; precisam ser únicos no projeto.
-export async function assertLabelFree(db: Db, projectId: string, label: string, exceptCharacterId?: string) {
+export async function assertLabelFree(db: DbOrTx, projectId: string, label: string, exceptCharacterId?: string) {
   const key = label.trim().toLowerCase();
   const refs = await db
     .select({ label: assets.label })
