@@ -444,6 +444,14 @@ describe("projetos", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("Não é possível");
   });
+
+  it("a rota de etapa não aceita generating nem assembling (só as ações próprias entram nelas)", async () => {
+    const p = await seedProject(testDb, { stage: "script" });
+    for (const stage of ["generating", "assembling"]) {
+      const res = await call(stageRoute.POST, { method: "POST", params: { id: p.id }, body: { stage } });
+      expect(res.status).toBe(400);
+    }
+  });
 });
 
 describe("arquivos", () => {
@@ -556,9 +564,14 @@ import { STAGES } from "@/domain/stages";
 import { setStage } from "@/services/projects";
 import { api } from "@/web/http";
 
+// `generating` e `assembling` NÃO podem ser pedidas por aqui: só entram pelas ações que
+// também enfileiram os jobs (`generateAllScenes` e `startAssembly`, Plano 2 Task 6).
+// Sem isso, uma chamada direta deixaria o projeto preso nessas etapas sem nenhum job rodando.
+const NAVIGABLE_STAGES = STAGES.filter((s) => s !== "generating" && s !== "assembling");
+
 export const POST = api(async ({ req, params, deps }) => {
-  const { stage } = z.object({ stage: z.enum(STAGES) }).parse(await req.json());
-  return setStage(deps.db, params.id, stage);
+  const { stage } = z.object({ stage: z.enum(NAVIGABLE_STAGES as [string, ...string[]]) }).parse(await req.json());
+  return setStage(deps.db, params.id, stage as (typeof STAGES)[number]);
 });
 ```
 
