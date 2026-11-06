@@ -1,7 +1,9 @@
 "use client";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { confirmTexts } from "@/lib/confirmTexts";
 import type { PanelProps, ProjectView } from "@/lib/types";
+import { useConfirm } from "./ConfirmDialog";
 
 type Scene = ProjectView["scenes"][number];
 
@@ -56,6 +58,7 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
   const { project, scenes, estimatedSeconds, scenesToGenerate } = snap;
   const [feedback, setFeedback] = useState("");
   const hasScenes = scenes.length > 0;
+  const confirm = useConfirm();
 
   return (
     <div className="stack">
@@ -72,8 +75,8 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
         <button
           className={hasScenes ? "secondary" : ""}
           disabled={working || (hasScenes && !feedback.trim())}
-          onClick={() => {
-            if (hasScenes && !confirm("Reescrever o roteiro descarta as edições manuais e as cenas já geradas. Continuar?")) return;
+          onClick={async () => {
+            if (hasScenes && !(await confirm(confirmTexts.rewriteScript()))) return;
             void run(async () => {
               await api(`/api/projects/${project.id}/script/plan`, { body: { feedback: feedback.trim() || undefined } });
               setFeedback("");
@@ -97,12 +100,9 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
           </span>
           <button
             disabled={working}
-            onClick={() => {
-              const message =
-                scenesToGenerate === 0
-                  ? null
-                  : `Serão geradas ${scenesToGenerate} de ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Cenas já aprovadas serão mantidas. Continuar?`;
-              if (message && !confirm(message)) return;
+            onClick={async () => {
+              // Sem cenas a gerar não há custo: vai direto para a revisão.
+              if (scenesToGenerate > 0 && !(await confirm(confirmTexts.generateScenes(scenesToGenerate, scenes.length, estimatedSeconds)))) return;
               void run(() => api(`/api/projects/${project.id}/generate`, { method: "POST", body: {} }));
             }}
           >

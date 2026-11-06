@@ -1,7 +1,9 @@
 "use client";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { confirmTexts } from "@/lib/confirmTexts";
 import type { PanelProps, ProjectView } from "@/lib/types";
+import { useConfirm } from "./ConfirmDialog";
 
 type Scene = ProjectView["scenes"][number];
 
@@ -20,6 +22,7 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [prompt, setPrompt] = useState(latest?.prompt ?? scene.visualPrompt);
+  const confirm = useConfirm();
 
   const shown = attempts.find((a) => a.id === (selectedId ?? scene.approvedAttemptId)) ?? latestDone;
   const pending = latest?.status === "queued" || latest?.status === "generating";
@@ -93,8 +96,8 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
               <button
                 className="secondary"
                 disabled={working || pending}
-                onClick={() => {
-                  if (!confirm("Gerar esta cena de novo? Isso consome crédito do provedor.")) return;
+                onClick={async () => {
+                  if (!(await confirm(confirmTexts.regenerateScene(index + 1, editing)))) return;
                   void run(async () => {
                     await api(`/api/scenes/${scene.id}/regenerate`, { body: editing ? { prompt } : {} });
                     setSelectedId(null);
@@ -121,6 +124,7 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
   const approvedCount = scenes.filter((s) => s.approvedAttemptId).length;
   // Conta a tentativa ATUAL (a mais recente) de cada cena; versões antigas prontas não contam.
   const doneCount = scenes.filter((s) => s.attempts[s.attempts.length - 1]?.status === "done").length;
+  const confirm = useConfirm();
 
   return (
     <div className="stack">
@@ -135,8 +139,8 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
             <button
               className="secondary"
               disabled={working}
-              onClick={() => {
-                if (!confirm("Regerar todas as cenas? Isso gera e cobra todos os clipes de novo.")) return;
+              onClick={async () => {
+                if (!(await confirm(confirmTexts.regenerateAll()))) return;
                 void run(() => api(`/api/projects/${project.id}/regenerate-all`, { method: "POST", body: {} }));
               }}
             >

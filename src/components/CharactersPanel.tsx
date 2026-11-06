@@ -1,7 +1,9 @@
 "use client";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { confirmTexts } from "@/lib/confirmTexts";
 import type { PanelProps, ProjectView } from "@/lib/types";
+import { useConfirm } from "./ConfirmDialog";
 
 type Character = ProjectView["characters"][number];
 
@@ -9,6 +11,7 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
   const [name, setName] = useState(c.name);
   const [description, setDescription] = useState(c.description);
   const dirty = name !== c.name || description !== c.description;
+  const confirm = useConfirm();
 
   return (
     <div className="card stack">
@@ -49,8 +52,8 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
         <button
           className="secondary"
           disabled={working}
-          onClick={() => {
-            if (!confirm(`Remover o personagem “${c.name}”? As cenas que o usam vão avisar que perderam a referência.`)) return;
+          onClick={async () => {
+            if (!(await confirm(confirmTexts.removeCharacter(c.name)))) return;
             void run(() => api(`/api/characters/${c.id}`, { method: "DELETE" }));
           }}
         >
@@ -66,6 +69,7 @@ export function CharactersPanel({ snap, run, working }: PanelProps) {
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const allApproved = characters.length > 0 && characters.every((c) => c.approved);
+  const confirm = useConfirm();
 
   return (
     <div className="stack">
@@ -78,8 +82,8 @@ export function CharactersPanel({ snap, run, working }: PanelProps) {
         <button
           className={characters.length ? "secondary" : ""}
           disabled={working}
-          onClick={() => {
-            if (characters.length && !confirm("Isso substitui todos os personagens atuais. Continuar?")) return;
+          onClick={async () => {
+            if (characters.length && !(await confirm(confirmTexts.reproposeCharacters()))) return;
             void run(() => api(`/api/projects/${project.id}/characters/propose`, { method: "POST", body: {} }));
           }}
         >

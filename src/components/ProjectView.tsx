@@ -6,12 +6,22 @@ import { api } from "@/lib/api";
 import { STAGE_LABELS } from "@/lib/labels";
 import { useProject } from "@/lib/useProject";
 import { BriefingPanel } from "./BriefingPanel";
+import { ConfirmProvider } from "./ConfirmDialog";
 import { CharactersPanel } from "./CharactersPanel";
 import { DonePanel } from "./DonePanel";
 import { ScenesPanel } from "./ScenesPanel";
 import { ScriptPanel } from "./ScriptPanel";
 
+// O ConfirmProvider fica acima de tudo para os painéis (e a própria barra de etapas) usarem useConfirm().
 export function ProjectView({ id }: { id: string }) {
+  return (
+    <ConfirmProvider>
+      <ProjectScreen id={id} />
+    </ConfirmProvider>
+  );
+}
+
+function ProjectScreen({ id }: { id: string }) {
   const { snap, loadError, reload } = useProject(id);
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
