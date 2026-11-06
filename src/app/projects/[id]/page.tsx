@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { LogoutButton } from "@/components/LogoutButton";
 import { ProjectView } from "@/components/ProjectView";
 import { isAuthedCookie } from "@/web/http";
 
@@ -10,6 +11,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   return (
     <main>
+      <LogoutButton />
       <ProjectView id={id} />
     </main>
   );

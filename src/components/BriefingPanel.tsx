@@ -29,11 +29,12 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
       <div className="card stack">
         <label>
           Nome
-          <input value={name} onChange={(e) => setName(e.target.value)} />
+          <input aria-label="Nome" value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <label>
           Copy / storytelling
           <textarea
+            aria-label="Copy / storytelling"
             style={{ minHeight: 200 }}
             value={copy}
             onChange={(e) => setCopy(e.target.value)}

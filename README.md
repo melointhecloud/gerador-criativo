@@ -21,6 +21,7 @@ Se a porta 5433 já estiver em uso, escolha outra: `POSTGRES_PORT=5434 docker co
 
 - `next start` (produção) grava o cookie de sessão com `Secure`: funciona em HTTPS e em `localhost`, mas não em `http://` por IP da rede. Para testar na rede local, use `pnpm dev`.
 - No modo fake, o texto de teste nunca cita personagens por rótulo; por isso as cenas não mostram referências por cena nem o aviso de corte.
+- `agentRules` desligado em `next.config.ts` para o `next dev` não criar arquivos (como `AGENTS.md`) no repositório.
 - Voltar ao roteiro e gerar de novo só gera as cenas sem tentativa aprovada (cenas editadas e novas); se todas estiverem aprovadas, vai direto à revisão sem custo.
 
 ## Testes

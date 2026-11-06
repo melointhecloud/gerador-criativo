@@ -22,15 +22,15 @@ function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "w
       </div>
       <label>
         Fala
-        <textarea value={dialogue} onChange={(e) => setDialogue(e.target.value)} />
+        <textarea aria-label={`Fala da cena ${index + 1}`} value={dialogue} onChange={(e) => setDialogue(e.target.value)} />
       </label>
       <label>
         Descrição visual
-        <textarea value={visualPrompt} onChange={(e) => setVisualPrompt(e.target.value)} />
+        <textarea aria-label={`Descrição visual da cena ${index + 1}`} value={visualPrompt} onChange={(e) => setVisualPrompt(e.target.value)} />
       </label>
       <label style={{ maxWidth: 140 }}>
         Duração (s)
-        <input type="number" min={3} step={1} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
+        <input aria-label={`Duração da cena ${index + 1} (s)`} type="number" min={3} step={1} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
       </label>
       {scene.notice && <div className="notice">{scene.notice}</div>}
       {dirty && (

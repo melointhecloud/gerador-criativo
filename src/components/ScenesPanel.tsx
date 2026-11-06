@@ -119,7 +119,8 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
   const { project, scenes } = snap;
   const reviewing = project.stage === "review";
   const approvedCount = scenes.filter((s) => s.approvedAttemptId).length;
-  const doneCount = scenes.filter((s) => s.attempts.some((a) => a.status === "done")).length;
+  // Conta a tentativa ATUAL (a mais recente) de cada cena; versões antigas prontas não contam.
+  const doneCount = scenes.filter((s) => s.attempts[s.attempts.length - 1]?.status === "done").length;
 
   return (
     <div className="stack">

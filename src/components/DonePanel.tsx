@@ -9,7 +9,9 @@ export function DonePanel({ snap, run, working }: PanelProps) {
       <strong>Vídeo final</strong>
       {finalAsset ? (
         <>
-          <video className="clip" style={{ maxWidth: 320 }} src={`/api/assets/${finalAsset.id}`} controls playsInline />
+          <div className="done-clip">
+            <video className="clip" src={`/api/assets/${finalAsset.id}`} controls playsInline />
+          </div>
           <div className="muted">
             {finalAsset.durationSeconds ? `${finalAsset.durationSeconds.toFixed(1)} s · ` : ""}720×1280 · MP4
           </div>

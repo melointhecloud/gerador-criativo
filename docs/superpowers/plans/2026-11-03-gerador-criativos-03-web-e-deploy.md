@@ -1547,7 +1547,8 @@ git commit -m "feat(api): authenticated endpoints for the whole creative flow"
 ```ts
 import type { NextConfig } from "next";
 
-const config: NextConfig = {};
+// agentRules desligado: o `next dev` não cria/atualiza AGENTS.md no repositório.
+const config: NextConfig = { agentRules: false };
 export default config;
 ```
 
@@ -1597,6 +1598,9 @@ video.clip { width: 100%; max-width: 260px; aspect-ratio: 9 / 16; background: #0
 .scene { display: grid; grid-template-columns: 270px 1fr; gap: 16px; }
 @media (max-width: 700px) { .scene { grid-template-columns: 1fr; } }
 .stack > * + * { margin-top: 8px; }
+.topbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.done-clip { width: 100%; max-width: 320px; aspect-ratio: 9 / 16; }
+.done-clip video.clip { display: block; width: 100%; height: 100%; max-width: none; aspect-ratio: auto; object-fit: contain; }
 ```
 
 `src/lib/types.ts`:
@@ -1754,7 +1758,7 @@ export default function LoginPage() {
       <form className="card stack" onSubmit={submit}>
         <label>
           Senha do time
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+          <input aria-label="Senha do time" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
         </label>
         {error && <div className="error" role="alert">{error}</div>}
         <button disabled={loading || !password}>Entrar</button>
@@ -1811,6 +1815,7 @@ export function NewProjectForm() {
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { LogoutButton } from "@/components/LogoutButton";
 import { NewProjectForm } from "@/components/NewProjectForm";
 import { STAGE_LABELS } from "@/lib/labels";
 import { listProjects } from "@/services/projects";
@@ -1826,6 +1831,7 @@ export default async function HomePage() {
 
   return (
     <main>
+      <LogoutButton />
       <h1>Gerador de Criativos</h1>
       <NewProjectForm />
       <h2>Projetos</h2>
@@ -1850,6 +1856,7 @@ export default async function HomePage() {
 ```tsx
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { LogoutButton } from "@/components/LogoutButton";
 import { ProjectView } from "@/components/ProjectView";
 import { isAuthedCookie } from "@/web/http";
 
@@ -1860,6 +1867,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   return (
     <main>
+      <LogoutButton />
       <ProjectView id={id} />
     </main>
   );
@@ -1992,11 +2000,12 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
       <div className="card stack">
         <label>
           Nome
-          <input value={name} onChange={(e) => setName(e.target.value)} />
+          <input aria-label="Nome" value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <label>
           Copy / storytelling
           <textarea
+            aria-label="Copy / storytelling"
             style={{ minHeight: 200 }}
             value={copy}
             onChange={(e) => setCopy(e.target.value)}
@@ -2121,7 +2130,10 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
         <button
           className="secondary"
           disabled={working}
-          onClick={() => void run(() => api(`/api/characters/${c.id}`, { method: "DELETE" }))}
+          onClick={() => {
+            if (!confirm(`Remover o personagem “${c.name}”? As cenas que o usam vão avisar que perderam a referência.`)) return;
+            void run(() => api(`/api/characters/${c.id}`, { method: "DELETE" }));
+          }}
         >
           Remover
         </button>
@@ -2225,15 +2237,15 @@ function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "w
       </div>
       <label>
         Fala
-        <textarea value={dialogue} onChange={(e) => setDialogue(e.target.value)} />
+        <textarea aria-label={`Fala da cena ${index + 1}`} value={dialogue} onChange={(e) => setDialogue(e.target.value)} />
       </label>
       <label>
         Descrição visual
-        <textarea value={visualPrompt} onChange={(e) => setVisualPrompt(e.target.value)} />
+        <textarea aria-label={`Descrição visual da cena ${index + 1}`} value={visualPrompt} onChange={(e) => setVisualPrompt(e.target.value)} />
       </label>
       <label style={{ maxWidth: 140 }}>
         Duração (s)
-        <input type="number" min={3} step={1} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
+        <input aria-label={`Duração da cena ${index + 1} (s)`} type="number" min={3} step={1} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
       </label>
       {scene.notice && <div className="notice">{scene.notice}</div>}
       {dirty && (
@@ -2443,7 +2455,8 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
   const { project, scenes } = snap;
   const reviewing = project.stage === "review";
   const approvedCount = scenes.filter((s) => s.approvedAttemptId).length;
-  const doneCount = scenes.filter((s) => s.attempts.some((a) => a.status === "done")).length;
+  // Conta a tentativa ATUAL (a mais recente) de cada cena; versões antigas prontas não contam.
+  const doneCount = scenes.filter((s) => s.attempts[s.attempts.length - 1]?.status === "done").length;
 
   return (
     <div className="stack">
@@ -2498,7 +2511,9 @@ export function DonePanel({ snap, run, working }: PanelProps) {
       <strong>Vídeo final</strong>
       {finalAsset ? (
         <>
-          <video className="clip" style={{ maxWidth: 320 }} src={`/api/assets/${finalAsset.id}`} controls playsInline />
+          <div className="done-clip">
+            <video className="clip" src={`/api/assets/${finalAsset.id}`} controls playsInline />
+          </div>
           <div className="muted">
             {finalAsset.durationSeconds ? `${finalAsset.durationSeconds.toFixed(1)} s · ` : ""}720×1280 · MP4
           </div>
@@ -2534,6 +2549,71 @@ Expected: typecheck limpo; `next build` termina com a lista de rotas, incluindo 
 
 Run: `pnpm test`
 Expected: tudo PASS.
+
+Páginas auxiliares e botão de sair (rótulos acessíveis em todos os campos; `confirm` ao remover personagem; contador de progresso conta a tentativa atual de cada cena):
+
+`src/components/LogoutButton.tsx` (botão "Sair" no topo das páginas autenticadas; usado em `page.tsx` e `projects/[id]/page.tsx`):
+```tsx
+"use client";
+import { useState } from "react";
+import { api } from "@/lib/api";
+
+// Barra no topo das páginas autenticadas: apaga o cookie de sessão e volta ao login.
+export function LogoutButton() {
+  const [loading, setLoading] = useState(false);
+
+  async function logout() {
+    setLoading(true);
+    try {
+      await api("/api/auth/logout", { method: "POST", body: {} });
+    } finally {
+      window.location.href = "/login";
+    }
+  }
+
+  return (
+    <div className="topbar">
+      <button className="secondary" disabled={loading} onClick={() => void logout()}>
+        Sair
+      </button>
+    </div>
+  );
+}
+```
+
+`src/app/not-found.tsx` (404 em pt-BR):
+```tsx
+import Link from "next/link";
+
+export default function NotFound() {
+  return (
+    <main style={{ maxWidth: 480 }}>
+      <h1>Página não encontrada</h1>
+      <p className="muted">O endereço que você abriu não existe ou foi removido.</p>
+      <Link className="button" href="/">
+        Ir para o início
+      </Link>
+    </main>
+  );
+}
+```
+
+`src/app/error.tsx` (erro genérico em pt-BR):
+```tsx
+"use client";
+
+export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  return (
+    <main style={{ maxWidth: 480 }}>
+      <h1>Algo deu errado</h1>
+      <p className="error" role="alert">
+        Não foi possível carregar esta página. Tente de novo; se o problema continuar, avise o time.
+      </p>
+      <button onClick={() => reset()}>Tentar de novo</button>
+    </main>
+  );
+}
+```
 
 - [ ] **Step 11: Commit**
 

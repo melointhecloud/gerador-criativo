@@ -26,7 +26,7 @@ export default function LoginPage() {
       <form className="card stack" onSubmit={submit}>
         <label>
           Senha do time
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+          <input aria-label="Senha do time" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
         </label>
         {error && <div className="error" role="alert">{error}</div>}
         <button disabled={loading || !password}>Entrar</button>

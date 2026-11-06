@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { LogoutButton } from "@/components/LogoutButton";
 import { NewProjectForm } from "@/components/NewProjectForm";
 import { STAGE_LABELS } from "@/lib/labels";
 import { listProjects } from "@/services/projects";
@@ -16,6 +17,7 @@ export default async function HomePage() {
 
   return (
     <main>
+      <LogoutButton />
       <h1>Gerador de Criativos</h1>
       <NewProjectForm />
       <h2>Projetos</h2>

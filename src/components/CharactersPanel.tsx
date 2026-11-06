@@ -49,7 +49,10 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
         <button
           className="secondary"
           disabled={working}
-          onClick={() => void run(() => api(`/api/characters/${c.id}`, { method: "DELETE" }))}
+          onClick={() => {
+            if (!confirm(`Remover o personagem “${c.name}”? As cenas que o usam vão avisar que perderam a referência.`)) return;
+            void run(() => api(`/api/characters/${c.id}`, { method: "DELETE" }));
+          }}
         >
           Remover
         </button>
