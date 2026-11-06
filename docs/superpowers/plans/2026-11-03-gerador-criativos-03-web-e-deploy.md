@@ -1868,7 +1868,7 @@ Esperado: em “Aprovar” só habilita com imagem pronta; “Continuar” só h
 
 Durante a etapa “Gerando cenas”, parar o worker (`Ctrl+C`), esperar 10 s e subir de novo.
 Esperado: a geração retoma e conclui; nenhuma cena fica presa em “Gerando…”.
-(Jobs que estavam em execução voltam à fila em até 10 minutos pelo `recoverStaleJobs`, a menos que tenham esgotado as tentativas: nesse caso são marcados como `failed` e o `onDead` limpa as linhas de domínio; para o teste acelerar com: `docker compose exec postgres psql -U postgres gerador -c "update jobs set locked_at = now() - interval '20 minutes' where status='running'"`.)
+(Jobs que estavam em execução voltam à fila depois de 30 minutos parados (`STALE_AFTER_MS` do worker) pelo `recoverStaleJobs`, a menos que tenham esgotado as tentativas: nesse caso são marcados como `failed` e o `onDead` limpa as linhas de domínio; para o teste acelerar com: `docker compose exec postgres psql -U postgres gerador -c "update jobs set locked_at = now() - interval '40 minutes' where status='running'"`.)
 
 - [ ] **Step 4: Segurança básica**
 
