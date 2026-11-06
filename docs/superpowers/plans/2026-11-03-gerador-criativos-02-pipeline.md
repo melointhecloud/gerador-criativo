@@ -4076,19 +4076,47 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { makeTestClip } from "@/modules/ffmpeg";
 import { FakeImageModel, FakeTextModel, FakeVideoModel } from "./fake";
-import type { Providers } from "./types";
+import type { Providers, VideoModel, VideoPoll, VideoRequest } from "./types";
 
-// Providers sem custo para desenvolver UI e fluxo (PROVIDER=fake).
-export async function createDevProviders(): Promise<Providers> {
+async function buildClip(): Promise<Buffer> {
   const dir = await mkdtemp(path.join(tmpdir(), "dev-clip-"));
-  let clip: Buffer;
   try {
     const file = path.join(dir, "clip.mp4");
     await makeTestClip(file, 3);
-    clip = await readFile(file);
+    return await readFile(file);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+// O clipe (ffmpeg) só é montado no primeiro start(): o `web` cria estes providers mas só usa o modelo de texto,
+// e a imagem Docker do web não tem ffmpeg. A promessa é memorizada; se falhar, é descartada para a próxima tentativa.
+class LazyClipVideoModel implements VideoModel {
+  private inner: Promise<FakeVideoModel> | null = null;
+
+  private get(): Promise<FakeVideoModel> {
+    if (!this.inner) {
+      const p = buildClip().then((clip) => new FakeVideoModel({ clip, pendingPolls: 2 }));
+      this.inner = p;
+      p.catch(() => {
+        if (this.inner === p) this.inner = null;
+      });
+    }
+    return this.inner;
+  }
+
+  async start(req: VideoRequest) {
+    return (await this.get()).start(req);
+  }
+
+  // poll() vem do mesmo processo depois do start(); se o worker reiniciar, o FakeVideoModel recomeça a contagem de pendências.
+  async poll(handle: { providerRef: string }): Promise<VideoPoll> {
+    return (await this.get()).poll(handle);
+  }
+}
+
+// Providers sem custo para desenvolver UI e fluxo (PROVIDER=fake).
+export async function createDevProviders(): Promise<Providers> {
 
   const text = new FakeTextModel(({ task }) =>
     task === "characters"
@@ -4106,9 +4134,11 @@ export async function createDevProviders(): Promise<Providers> {
           ],
         },
   );
-  return { text, image: new FakeImageModel(), video: new FakeVideoModel({ clip, pendingPolls: 2 }) };
+  return { text, image: new FakeImageModel(), video: new LazyClipVideoModel() };
 }
 ```
+
+> O clipe é montado de forma preguiçosa no primeiro `start()` (Plano 3, Task 4): o `web` cria estes providers só para usar o texto e a imagem Docker dele não tem ffmpeg.
 
 Run: `pnpm vitest run tests/providers/dev.test.ts` — Expected: PASS.
 
