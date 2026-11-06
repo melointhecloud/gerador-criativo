@@ -1,0 +1,16 @@
+FROM node:24-bookworm-slim
+ENV NODE_ENV=production
+# pnpm na versão fixada em package.json ("packageManager"), via corepack.
+RUN corepack enable
+WORKDIR /app
+RUN chown node:node /app
+USER node
+COPY --chown=node:node package.json pnpm-lock.yaml ./
+# Instala também as devDependencies: o build do Next (TypeScript) e o `pnpm db:migrate` (tsx) dependem delas.
+RUN pnpm install --frozen-lockfile --prod=false
+COPY --chown=node:node . .
+RUN pnpm build
+EXPOSE 3000
+# Segredos só chegam por variáveis de ambiente em tempo de execução; nada é gravado na imagem.
+# Binário direto (sem pnpm no meio) para o SIGTERM chegar ao processo.
+CMD ["node_modules/.bin/next", "start"]

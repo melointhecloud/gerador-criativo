@@ -1,0 +1,16 @@
+FROM node:24-bookworm-slim
+ENV NODE_ENV=production
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+WORKDIR /app
+RUN chown node:node /app
+USER node
+COPY --chown=node:node package.json pnpm-lock.yaml ./
+# O worker roda via tsx (devDependency), então instalamos tudo.
+RUN pnpm install --frozen-lockfile --prod=false
+COPY --chown=node:node . .
+# Sem processo HTTP: não há healthcheck. SIGTERM encerra o worker de forma graciosa.
+STOPSIGNAL SIGTERM
+CMD ["node_modules/.bin/tsx", "src/worker/main.ts"]

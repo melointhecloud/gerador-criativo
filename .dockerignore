@@ -1,0 +1,16 @@
+.git
+.claude
+.superpowers
+node_modules
+.next
+.env
+.env.*
+!.env.example
+storage-data
+spike-out
+docs
+tests
+*.tsbuildinfo
+next-env.d.ts
+Dockerfile.*
+docker-compose.yml

@@ -2529,110 +2529,38 @@ git commit -m "feat(ui): pages and stage panels for the full creative flow"
 ### Task 5: Imagens de deploy e README
 
 **Files:**
+- Modify: `package.json` (campos `packageManager` e `engines`)
 - Create: `Dockerfile.web`, `Dockerfile.worker`, `.dockerignore`, `README.md`
 
 - [ ] **Step 1: Criar `.dockerignore`**
 
-```
-node_modules
-.next
-.git
-.env
-.env.local
-storage-data
-spike-out
-docs
-tests
-```
+Conteúdo: o arquivo `.dockerignore` do repositório (exclui `.git`, `.claude`, `.superpowers`, `node_modules`, `.next`, `.env*` exceto `.env.example`, `storage-data`, `spike-out`, `docs`, `tests`, `*.tsbuildinfo`, `next-env.d.ts`, `Dockerfile.*`, `docker-compose.yml`). Não excluir `drizzle/`, `src/`, `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, `next.config.ts`.
 
-- [ ] **Step 2: Criar `Dockerfile.web`**
+- [ ] **Step 2: Fixar versões e criar `Dockerfile.web`**
 
-```dockerfile
-FROM node:22-slim
-RUN corepack enable
-WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY . .
-RUN pnpm build
-ENV NODE_ENV=production
-EXPOSE 3000
-CMD ["pnpm", "start"]
-```
+Em `package.json`: `"packageManager": "pnpm@10.33.2"` (o corepack usa esta versão na imagem) e `"engines": {"node": ">=22"}`. Imagem base `node:24-bookworm-slim` (mesmo Node do desenvolvimento). Instala todas as dependências (`--prod=false`) porque o build do Next e o `pnpm db:migrate` (tsx) precisam das devDependencies; roda como usuário `node`; `CMD ["node_modules/.bin/next", "start"]` (binário direto para o SIGTERM chegar ao processo). Ver `Dockerfile.web`. O pnpm 10 não bloqueou nenhum build script necessário (`onlyBuiltDependencies` não foi preciso). O web não precisa de ffmpeg.
 
 - [ ] **Step 3: Criar `Dockerfile.worker`**
 
-```dockerfile
-FROM node:22-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
-RUN corepack enable
-WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY . .
-ENV NODE_ENV=production
-CMD ["pnpm", "worker"]
-```
+Igual ao web, mais `apt-get install -y --no-install-recommends ffmpeg` (inclui `ffprobe`), `STOPSIGNAL SIGTERM` e `CMD ["node_modules/.bin/tsx", "src/worker/main.ts"]`, sem build do Next. Ver `Dockerfile.worker`.
 
 - [ ] **Step 4: Validar as imagens localmente**
 
 Run:
 ```bash
-docker build -f Dockerfile.web -t gerador-web . && docker build -f Dockerfile.worker -t gerador-worker .
-docker run --rm gerador-worker ffmpeg -version | head -1
+docker build -f Dockerfile.web -t gerador-web:test . && docker build -f Dockerfile.worker -t gerador-worker:test .
+docker run --rm --entrypoint ffmpeg gerador-worker:test -version | head -1
 ```
-Expected: os dois builds terminam sem erro; a última linha imprime `ffmpeg version …`.
+Expected: os dois builds terminam sem erro; a última linha imprime `ffmpeg version …`. Opcional: subir o web com `-p 3057:3000` e as variáveis mínimas e conferir `GET /login` = 200; subir o worker e `docker stop` deve imprimir "SIGTERM recebido" e sair com código 0. (Em Docker Desktop, `--network host` não expõe a porta; use `-p 3057:3000` e `host.docker.internal` para o banco. `pnpm db:migrate` também roda dentro da imagem do web.)
 
 - [ ] **Step 5: Criar `README.md`**
 
-````markdown
-# Gerador de Criativos TikTok
-
-Ferramenta interna para gerar criativos em vídeo (UGC e novelinha) para TikTok Ads, com aprovação humana em cada etapa.
-
-Docs: `docs/superpowers/specs/` (design) e `docs/superpowers/plans/` (implementação). Resultado da validação do provider de vídeo: `docs/provider-spike.md`.
-
-## Rodar localmente (sem custo, providers falsos)
-
-Requisitos: Node 22, pnpm, Docker, ffmpeg.
-
-```bash
-cp .env.example .env          # PROVIDER=fake já é o padrão do exemplo
-docker compose up -d          # Postgres em localhost:5433
-pnpm install
-pnpm db:migrate
-pnpm dev                      # terminal 1: http://localhost:3000
-pnpm worker                   # terminal 2
-```
-
-Senha de acesso: valor de `ACCESS_PASSWORD` no `.env`.
-
-## Testes
-
-```bash
-docker compose up -d
-pnpm test                     # banco de teste: gerador_test
-LIVE=1 PROVIDER=gemini pnpm vitest run tests/live   # opcional, usa a API real (consome crédito)
-```
-
-## Produção (Railway)
-
-Dois serviços do mesmo repositório + Postgres + Bucket:
-
-| Serviço | Dockerfile | Observações |
-|---|---|---|
-| `web` | `Dockerfile.web` | domínio público; **Pre-deploy command:** `pnpm db:migrate` |
-| `worker` | `Dockerfile.worker` | sem domínio; **exatamente 1 réplica** (o reaproveitamento de jobs travados assume um único worker) |
-
-Variáveis (nos dois serviços): `DATABASE_URL` (do Postgres do Railway), `PROVIDER=gemini`, `GEMINI_API_KEY`, `GEMINI_TEXT_MODEL`, `GEMINI_IMAGE_MODEL`, `GEMINI_VIDEO_MODEL`, `MAX_SCENE_REFERENCES`, `SCENE_MAX_SECONDS`, `STORAGE=s3`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` (do Bucket do Railway), `ACCESS_PASSWORD`, `SESSION_SECRET` (≥ 32 caracteres aleatórios). Só o worker usa `WORKER_CONCURRENCY`.
-
-`MAX_SCENE_REFERENCES` e `SCENE_MAX_SECONDS` devem vir de `docs/provider-spike.md`.
-````
+Conteúdo: o `README.md` do repositório (visão geral, execução local com providers falsos, testes, tabela de variáveis de ambiente conferida com `src/config/env.ts`, estado do provider Gemini, deploy no Railway com checklist, notas de segurança e operação).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Dockerfile.web Dockerfile.worker .dockerignore README.md
+git add Dockerfile.web Dockerfile.worker .dockerignore README.md package.json
 git commit -m "chore: docker images for web and worker, readme"
 ```
 
