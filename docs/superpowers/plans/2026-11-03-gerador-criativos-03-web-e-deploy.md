@@ -685,7 +685,7 @@ export function api(handler: (a: ApiArgs) => Promise<unknown>, opts: { auth?: bo
 
 > Notas de execução (corrigidas após revisão): `api()` falha fechado (qualquer erro na verificação da sessão = 401; erro ao montar o contexto = 500 sem rodar o handler e sem mapear o ZodError do `loadEnv` para 400); `auth:false` é só para a rota de login; `getContext()` limpa o cache quando a criação rejeita (ex.: ffmpeg ausente com `PROVIDER=fake`); erros Zod viram resumo em pt-BR ("obrigatório" só quando a mensagem nativa diz `received undefined`; o Zod v4 não põe `input` na issue); métodos que não são GET/HEAD/OPTIONS passam por `isCrossOrigin` (Sec-Fetch-Site, senão Origin x Host/X-Forwarded-Host) depois da sessão, inclusive em `auth:false`; `FILE_HEADERS` (`Cache-Control: private`, `nosniff`) deve ser usado nas respostas de arquivo da Task 3. A assinatura `api(async ({ req, params, deps, env }) => ...)` não mudou, então os snippets da Task 3 continuam válidos; `params` é `Promise` no Next 16, já tratado.
 
-**Portão central das páginas (proxy do Next 16).** `readCookie` foi movido para `src/web/cookie.ts` (sem dependências, seguro para o proxy) e é reexportado por `src/web/http.ts`. As páginas continuam checando a sessão (defesa em profundidade), mas agora há UM portão: `src/proxy.ts` (nome do Next 16 para o middleware; exporta `proxy` e `config.matcher`), que redireciona para `/login` toda requisição de página sem sessão válida. Ficam de fora `/login`, `/api/**` (continuam respondendo 401 em JSON via `api()`), `/_next/**` e qualquer caminho com ponto (favicon, estáticos). A decisão vive em funções puras testadas.
+**Portão central das páginas (proxy do Next 16).** `readCookie` foi movido para `src/web/cookie.ts` (sem dependências, seguro para o proxy) e é reexportado por `src/web/http.ts`. As páginas continuam checando a sessão (defesa em profundidade), mas agora há UM portão: `src/proxy.ts` (nome do Next 16 para o middleware; exporta `proxy` e `config.matcher`), que redireciona para `/login` toda requisição de página sem sessão válida. Ficam de fora `/login`, `/api/**` (continuam respondendo 401 em JSON via `api()`), `/_next/**` e arquivos estáticos conhecidos (extensões `ico|png|jpe?g|gif|svg|webp|txt|xml|css|js|map|woff2?`; favicon, imagens, fontes). A decisão vive em funções puras testadas.
 
 `src/web/cookie.ts`:
 ```ts
@@ -706,10 +706,12 @@ import { SESSION_COOKIE, verifySession } from "@/auth/session";
 import { readCookie } from "@/web/cookie";
 
 // Portão central das páginas (usado por src/proxy.ts). Rotas de API ficam de fora: `api()` já responde 401 em JSON.
-// Mantenha em sincronia com `config.matcher` de src/proxy.ts (há teste cobrindo os dois).
+// Mantenha em sincronia com `config.matcher` de src/proxy.ts (há teste cobrindo os dois). Só extensões estáticas conhecidas
+// ficam de fora: um caminho com ponto qualquer (ex.: /projects/abc.def) continua sob o portão.
+// Sensível a maiúsculas de propósito: o Next compila o matcher com `i` (/LOGIN pula o proxy), mas esses caminhos são 404.
 export function isGatedPath(pathname: string): boolean {
   if (/^\/(login|api|_next)(\/|$)/.test(pathname)) return false;
-  if (pathname.includes(".")) return false; // favicon e demais arquivos estáticos
+  if (/\.(?:ico|png|jpe?g|gif|svg|webp|txt|xml|css|js|map|woff2?)$/.test(pathname)) return false; // favicon e estáticos
   return true;
 }
 
@@ -734,19 +736,26 @@ import type { NextRequest } from "next/server";
 import { decideGate } from "@/web/page-gate";
 
 // Portão central das páginas: sem sessão válida, tudo vai para /login. Fica de fora (ver `isGatedPath`):
-// /login, /api/** (responde 401 em JSON via `api()`), /_next/**, e qualquer caminho com ponto (favicon, estáticos).
+// /login, /api/** (responde 401 em JSON via `api()`), /_next/**, e arquivos estáticos conhecidos (favicon, imagens, txt, xml, css, js, map, fontes).
 export async function proxy(request: NextRequest) {
   const d = await decideGate({
     pathname: request.nextUrl.pathname,
     cookie: request.headers.get("cookie"),
     secret: process.env.SESSION_SECRET,
   });
-  if (d.action === "redirect") return NextResponse.redirect(new URL(d.to, request.url));
+  if (d.action === "redirect") {
+    // Clona nextUrl (origem que o Next resolveu): `request.url` pode trazer o host interno atrás do Railway/Docker.
+    const url = request.nextUrl.clone();
+    url.pathname = d.to;
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/((?!login(?:/|$)|api(?:/|$)|_next(?:/|$)|.*\\..*).*)"],
+  // Literal estático (o Next o analisa em build); a lista de extensões deve ser igual à de `isGatedPath` (teste confere).
+  matcher: ["/((?!login(?:/|$)|api(?:/|$)|_next(?:/|$)|.*\\.(?:ico|png|jpe?g|gif|svg|webp|txt|xml|css|js|map|woff2?)$).*)"],
 };
 ```
 
@@ -756,12 +765,17 @@ import { readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSession, SESSION_COOKIE } from "@/auth/session";
-import { config } from "@/proxy";
+import { NextRequest } from "next/server";
+import { config, proxy } from "@/proxy";
 import { decideGate, isGatedPath } from "@/web/page-gate";
 
 const SECRET = "s".repeat(40);
-const EXCLUDED = ["/login", "/login/", "/api/projects", "/api", "/_next/static/x.js", "/_next/image", "/favicon.ico", "/logo.png"];
-const GATED = ["/", "/projects/x", "/some/new/page", "/loginx", "/apixyz"];
+const EXCLUDED = [
+  "/login", "/login/", "/login/x", "/api/projects", "/api", "/api/x", "/_next/static/x.js", "/_next/static/a.js", "/_next/image",
+  "/favicon.ico", "/logo.png", "/robots.txt", "/sitemap.xml", "/static.js.map",
+];
+// Caminhos com ponto que NÃO são estáticos conhecidos continuam sob o portão (ex.: /projects/abc.def casa com a página [id]).
+const GATED = ["/", "/projects/x", "/some/new/page", "/loginx", "/login-admin", "/apixyz", "/projects/a.b", "/projects/x.y.z", "/new.page"];
 
 describe("isGatedPath", () => {
   it("protege páginas e deixa de fora login, API, assets do Next e estáticos", () => {
@@ -798,8 +812,22 @@ describe("decideGate", () => {
 describe("matcher do proxy", () => {
   it("cobre exatamente os mesmos caminhos que isGatedPath", () => {
     expect(config.matcher).toHaveLength(1);
-    const re = new RegExp(`^${config.matcher[0]}$`);
+    // O Next compila o matcher sem diferenciar maiúsculas (flag `i`). Assim, /LOGIN e /Api/x também pulam o proxy,
+    // mas viram 404 porque as rotas do Next diferenciam maiúsculas; por isso `isGatedPath` fica sensível a caixa.
+    const re = new RegExp(`^${config.matcher[0]}$`, "i");
     for (const p of [...GATED, ...EXCLUDED]) expect(re.test(p), p).toBe(isGatedPath(p));
+  });
+});
+
+describe("redirecionamento do proxy", () => {
+  it("sem cookie, redireciona para /login usando a origem resolvida pelo Next e sem query", async () => {
+    const req = new NextRequest("http://0.0.0.0:3000/projects/x?segredo=1");
+    const res = await proxy(req);
+    expect(res.status).toBe(307);
+    const location = res.headers.get("location") ?? "";
+    expect(location).toBe(`${req.nextUrl.origin}/login`);
+    expect(location).toBe("http://0.0.0.0:3000/login");
+    expect(location).not.toContain("segredo");
   });
 });
 
@@ -828,7 +856,7 @@ describe("páginas existentes", () => {
 });
 ```
 
-Verificação: `pnpm build` lista `ƒ Proxy (Middleware)`. O teste de páginas falha se surgir uma `page.tsx` fora do portão (tudo exceto `login`). Atenção: um caminho com ponto (`/projects/x.y`) não passa pelo proxy; a checagem da própria página cobre isso.
+Verificação: `pnpm build` lista `ƒ Proxy (Middleware)`. O teste de páginas falha se surgir uma `page.tsx` fora do portão (tudo exceto `login`). Um caminho com ponto que não seja estático conhecido (`/projects/x.y`) continua sob o portão. O redirecionamento clona `request.nextUrl` (não usa `request.url`, que atrás do Railway/Docker pode ter o host interno) e há teste com `NextRequest` em `0.0.0.0:3000`.
 
 - [ ] **Step 6: Acrescentar `getAsset` em `src/services/projects.ts`**
 

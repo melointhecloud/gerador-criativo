@@ -2,12 +2,17 @@ import { readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSession, SESSION_COOKIE } from "@/auth/session";
-import { config } from "@/proxy";
+import { NextRequest } from "next/server";
+import { config, proxy } from "@/proxy";
 import { decideGate, isGatedPath } from "@/web/page-gate";
 
 const SECRET = "s".repeat(40);
-const EXCLUDED = ["/login", "/login/", "/api/projects", "/api", "/_next/static/x.js", "/_next/image", "/favicon.ico", "/logo.png"];
-const GATED = ["/", "/projects/x", "/some/new/page", "/loginx", "/apixyz"];
+const EXCLUDED = [
+  "/login", "/login/", "/login/x", "/api/projects", "/api", "/api/x", "/_next/static/x.js", "/_next/static/a.js", "/_next/image",
+  "/favicon.ico", "/logo.png", "/robots.txt", "/sitemap.xml", "/static.js.map",
+];
+// Caminhos com ponto que NÃO são estáticos conhecidos continuam sob o portão (ex.: /projects/abc.def casa com a página [id]).
+const GATED = ["/", "/projects/x", "/some/new/page", "/loginx", "/login-admin", "/apixyz", "/projects/a.b", "/projects/x.y.z", "/new.page"];
 
 describe("isGatedPath", () => {
   it("protege páginas e deixa de fora login, API, assets do Next e estáticos", () => {
@@ -44,8 +49,22 @@ describe("decideGate", () => {
 describe("matcher do proxy", () => {
   it("cobre exatamente os mesmos caminhos que isGatedPath", () => {
     expect(config.matcher).toHaveLength(1);
-    const re = new RegExp(`^${config.matcher[0]}$`);
+    // O Next compila o matcher sem diferenciar maiúsculas (flag `i`). Assim, /LOGIN e /Api/x também pulam o proxy,
+    // mas viram 404 porque as rotas do Next diferenciam maiúsculas; por isso `isGatedPath` fica sensível a caixa.
+    const re = new RegExp(`^${config.matcher[0]}$`, "i");
     for (const p of [...GATED, ...EXCLUDED]) expect(re.test(p), p).toBe(isGatedPath(p));
+  });
+});
+
+describe("redirecionamento do proxy", () => {
+  it("sem cookie, redireciona para /login usando a origem resolvida pelo Next e sem query", async () => {
+    const req = new NextRequest("http://0.0.0.0:3000/projects/x?segredo=1");
+    const res = await proxy(req);
+    expect(res.status).toBe(307);
+    const location = res.headers.get("location") ?? "";
+    expect(location).toBe(`${req.nextUrl.origin}/login`);
+    expect(location).toBe("http://0.0.0.0:3000/login");
+    expect(location).not.toContain("segredo");
   });
 });
 
