@@ -37,7 +37,9 @@ export function ProjectView({ id }: { id: string }) {
   const stages = stagesFor(project.mode);
   const currentIndex = stages.indexOf(project.stage);
   // A API só aceita voltar para etapas navegáveis, e só o worker tira o projeto de `generating`.
-  const canGoBack = project.stage !== "generating" && project.stage !== "assembling";
+  // Em revisão, também não dá para voltar enquanto uma regeração está na fila ou rodando.
+  const hasPending = snap.scenes.some((sc) => sc.attempts.some((a) => a.status === "queued" || a.status === "generating"));
+  const canGoBack = project.stage !== "generating" && project.stage !== "assembling" && !(project.stage === "review" && hasPending);
   const goTo = (stage: Stage) => run(() => api(`/api/projects/${id}/stage`, { body: { stage } }));
 
   return (
@@ -59,6 +61,7 @@ export function ProjectView({ id }: { id: string }) {
               className={`step ${i === currentIndex ? "current" : past ? "past" : ""}`}
               style={{ cursor: clickable ? "pointer" : "default" }}
               disabled={!clickable || working}
+              title={past && !canGoBack && hasPending ? "Aguarde as gerações em andamento" : undefined}
               aria-current={i === currentIndex ? "step" : undefined}
               onClick={() => void goTo(s)}
             >

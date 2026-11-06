@@ -148,6 +148,11 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
   // Só o worker tira o projeto de `generating` (advanceToReviewIfIdle). Sair daqui permitiria um novo
   // generateAllScenes e, com ele, um segundo conjunto de tentativas pagas.
   if (project.stage === "generating") throw new DomainError("Aguarde a geração das cenas terminar antes de mudar de etapa.");
+  // Sair da revisão com regeração em andamento deixaria a cena sem aprovação e sem tentativa "pendente" para
+  // o roteiro, que geraria uma segunda tentativa paga.
+  if (project.stage === "review" && target !== "assembling" && (await hasPendingAttempts(db, projectId))) {
+    throw new DomainError("Aguarde as gerações em andamento terminarem antes de mudar de etapa.");
+  }
   if (!canTransition(project.mode, project.stage, target)) {
     throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
   }
@@ -161,17 +166,21 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
   return row;
 }
 
-// Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
-export async function advanceToReviewIfIdle(db: DbOrTx, projectId: string): Promise<void> {
-  const project = await getProject(db, projectId);
-  if (project.stage !== "generating") return;
-  const pending = await db
+async function hasPendingAttempts(db: DbOrTx, projectId: string): Promise<boolean> {
+  const rows = await db
     .select({ id: sceneAttempts.id })
     .from(sceneAttempts)
     .innerJoin(scenes, eq(sceneAttempts.sceneId, scenes.id))
     .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])))
     .limit(1);
-  if (pending.length === 0) {
+  return rows.length > 0;
+}
+
+// Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
+export async function advanceToReviewIfIdle(db: DbOrTx, projectId: string): Promise<void> {
+  const project = await getProject(db, projectId);
+  if (project.stage !== "generating") return;
+  if (!(await hasPendingAttempts(db, projectId))) {
     await db.update(projects).set({ stage: "review", updatedAt: new Date() }).where(eq(projects.id, projectId));
   }
 }

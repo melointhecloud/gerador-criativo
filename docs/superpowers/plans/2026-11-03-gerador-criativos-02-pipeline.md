@@ -1051,6 +1051,20 @@ describe("setStage", () => {
     expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("generating");
   });
 
+  it("não deixa sair de review com geração em andamento; libera quando todas terminaram", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const s = await seedScene(db, p.id, 0);
+    const a = await seedAttempt(db, s.id, { status: "done" });
+    const b = await seedAttempt(db, s.id, { status: "queued" });
+    await expect(setStage(db, p.id, "script")).rejects.toThrow(/Aguarde as gerações em andamento/);
+    await db.update(sceneAttempts).set({ status: "generating" }).where(eq(sceneAttempts.id, b.id));
+    await expect(setStage(db, p.id, "script")).rejects.toThrow(/Aguarde as gerações em andamento/);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+    await db.update(sceneAttempts).set({ status: "failed" }).where(eq(sceneAttempts.id, b.id));
+    expect(a.status).toBe("done");
+    expect((await setStage(db, p.id, "script")).stage).toBe("script");
+  });
+
   it("permite voltar de review para script", async () => {
     const p = await seedProject(db, { stage: "review" });
     expect((await setStage(db, p.id, "script")).stage).toBe("script");
@@ -1276,6 +1290,11 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
   // Só o worker tira o projeto de `generating` (advanceToReviewIfIdle). Sair daqui permitiria um novo
   // generateAllScenes e, com ele, um segundo conjunto de tentativas pagas.
   if (project.stage === "generating") throw new DomainError("Aguarde a geração das cenas terminar antes de mudar de etapa.");
+  // Sair da revisão com regeração em andamento deixaria a cena sem aprovação e sem tentativa "pendente" para
+  // o roteiro, que geraria uma segunda tentativa paga.
+  if (project.stage === "review" && target !== "assembling" && (await hasPendingAttempts(db, projectId))) {
+    throw new DomainError("Aguarde as gerações em andamento terminarem antes de mudar de etapa.");
+  }
   if (!canTransition(project.mode, project.stage, target)) {
     throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
   }
@@ -1289,17 +1308,21 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
   return row;
 }
 
-// Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
-export async function advanceToReviewIfIdle(db: DbOrTx, projectId: string): Promise<void> {
-  const project = await getProject(db, projectId);
-  if (project.stage !== "generating") return;
-  const pending = await db
+async function hasPendingAttempts(db: DbOrTx, projectId: string): Promise<boolean> {
+  const rows = await db
     .select({ id: sceneAttempts.id })
     .from(sceneAttempts)
     .innerJoin(scenes, eq(sceneAttempts.sceneId, scenes.id))
     .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])))
     .limit(1);
-  if (pending.length === 0) {
+  return rows.length > 0;
+}
+
+// Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
+export async function advanceToReviewIfIdle(db: DbOrTx, projectId: string): Promise<void> {
+  const project = await getProject(db, projectId);
+  if (project.stage !== "generating") return;
+  if (!(await hasPendingAttempts(db, projectId))) {
     await db.update(projects).set({ stage: "review", updatedAt: new Date() }).where(eq(projects.id, projectId));
   }
 }
@@ -1376,10 +1399,10 @@ import { eq } from "drizzle-orm";
 import { jobs, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import { enqueue } from "@/queue/queue";
 import {
-  approveAttempt, generateAllScenes, generationPlan, planProjectScript, regenerateAllScenes, regenerateScene,
+  approveAttempt, generateAllScenes, generationPlan, planProjectScript, sceneIdsWithPendingAttempt, regenerateAllScenes, regenerateScene,
   startAssembly, totalSeconds, updateScene,
 } from "@/services/scenes";
-import { getSnapshot } from "@/services/projects";
+import { getSnapshot, setStage } from "@/services/projects";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAsset, seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
@@ -1593,7 +1616,8 @@ describe("generateAllScenes ao voltar para o roteiro (só gera cenas sem aprova�
   it("depois de editar uma cena, só ela ganha tentativa e job; as outras mantêm a aprovação", async () => {
     const { m, p, list } = await allApprovedBackInScript();
     await updateScene(db, list[1]!.scene.id, { dialogue: "Fala nova" }, 8);
-    expect(generationPlan((await getSnapshot(db, p.id)).scenes)).toEqual({ scenesToGenerate: 1, estimatedSeconds: 5 });
+    const snapScenes = await getSnapshot(db, p.id);
+    expect(generationPlan(snapScenes.scenes, sceneIdsWithPendingAttempt(snapScenes.scenes))).toEqual({ scenesToGenerate: 1, estimatedSeconds: 5 });
     await generateAllScenes(m.deps, p.id);
     const snap = await getSnapshot(db, p.id);
     expect(snap.project.stage).toBe("generating");
@@ -1606,12 +1630,54 @@ describe("generateAllScenes ao voltar para o roteiro (só gera cenas sem aprova�
     expect((queued[0]!.payload as { attemptId: string }).attemptId).toBe(snap.scenes[1]!.attempts[1]!.id);
   });
 
-  it("generationPlan: sem aprovações conta todas; com tudo aprovado, zero", async () => {
-    expect(generationPlan([{ targetSeconds: 5, approvedAttemptId: null }, { targetSeconds: 6, approvedAttemptId: null }])).toEqual({
-      scenesToGenerate: 2,
-      estimatedSeconds: 11,
+  it("generationPlan: sem aprovações conta todas; com tudo aprovado, zero; cenas pendentes ficam de fora", async () => {
+    const none = new Set<string>();
+    expect(
+      generationPlan([{ id: "a", targetSeconds: 5, approvedAttemptId: null }, { id: "b", targetSeconds: 6, approvedAttemptId: null }], none),
+    ).toEqual({ scenesToGenerate: 2, estimatedSeconds: 11 });
+    expect(generationPlan([{ id: "a", targetSeconds: 5, approvedAttemptId: "x" }], none)).toEqual({ scenesToGenerate: 0, estimatedSeconds: 0 });
+    expect(
+      generationPlan([{ id: "a", targetSeconds: 5, approvedAttemptId: null }, { id: "b", targetSeconds: 6, approvedAttemptId: null }], new Set(["a"])),
+    ).toEqual({ scenesToGenerate: 1, estimatedSeconds: 6 });
+  });
+
+  it("snapshot: cena com tentativa pendente não entra em scenesToGenerate/estimatedSeconds", async () => {
+    const { p, list } = await allApprovedBackInScript();
+    await db.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, list[0]!.scene.id));
+    await db.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, list[1]!.scene.id));
+    await seedAttempt(db, list[0]!.scene.id, { status: "generating" });
+    const snap = await getSnapshot(db, p.id);
+    expect(generationPlan(snap.scenes, sceneIdsWithPendingAttempt(snap.scenes))).toEqual({ scenesToGenerate: 1, estimatedSeconds: 5 });
+  });
+
+  describe("cena com tentativa em andamento (estado inalcançável pela UI, defesa em profundidade)", () => {
+    async function withPending() {
+      const { m, p, list } = await allApprovedBackInScript();
+      for (const i of [0, 1]) await db.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, list[i]!.scene.id));
+      await seedAttempt(db, list[0]!.scene.id, { status: "queued" });
+      await seedAttempt(db, list[1]!.scene.id, { status: "generating" });
+      return { m, p, list };
+    }
+
+    it("não cria segunda tentativa nem job e vai para generating sem enfileirar quando só restam pendentes", async () => {
+      const { m, p } = await withPending();
+      await generateAllScenes(m.deps, p.id);
+      expect((await getSnapshot(db, p.id)).project.stage).toBe("generating");
+      expect(await db.select().from(sceneAttempts)).toHaveLength(3 + 2);
+      expect(await db.select().from(jobs)).toHaveLength(0);
     });
-    expect(generationPlan([{ targetSeconds: 5, approvedAttemptId: "x" }])).toEqual({ scenesToGenerate: 0, estimatedSeconds: 0 });
+
+    it("gera só as cenas que precisam e ignora as pendentes", async () => {
+      const { m, p, list } = await withPending();
+      await db.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, list[2]!.scene.id));
+      await generateAllScenes(m.deps, p.id);
+      const snap = await getSnapshot(db, p.id);
+      expect(snap.project.stage).toBe("generating");
+      expect(snap.scenes.map((s) => s.attempts.length)).toEqual([2, 2, 2]);
+      const queued = await db.select().from(jobs);
+      expect(queued).toHaveLength(1);
+      expect((queued[0]!.payload as { attemptId: string }).attemptId).toBe(snap.scenes[2]!.attempts[1]!.id);
+    });
   });
 });
 
@@ -1627,6 +1693,13 @@ describe("regenerateScene / regenerateAllScenes", () => {
     await db.update(scenes).set({ approvedAttemptId: a0.id }).where(eq(scenes.id, s0.id));
     return { m, p, s0, s1, a0, a1 };
   }
+
+  it("depois de regenerar, o projeto não volta ao roteiro enquanto a geração roda", async () => {
+    const { m, p, s0 } = await inReview();
+    await regenerateScene(m.deps, s0.id);
+    await expect(setStage(db, p.id, "script")).rejects.toThrow(/Aguarde as gerações em andamento/);
+    expect((await getSnapshot(db, p.id)).project.stage).toBe("review");
+  });
 
   it("cria nova tentativa, mantém a anterior e remove a aprovação", async () => {
     const { m, s0 } = await inReview();
@@ -1769,7 +1842,7 @@ Expected: FAIL — `@/services/scenes` não encontrado.
 
 - [ ] **Step 3: Implementar `src/services/scenes.ts`**
 
-Atomicidade e concorrência: cada operação pública roda em `db.transaction`, com `enqueue` e `setStage` na MESMA transação (aceitam `DbOrTx`, ver Plano 1 `src/db/client.ts`). `regenerateScene`/`regenerateAllScenes` travam a linha da cena (`SELECT ... FOR UPDATE`) e reconferem "tentativa pendente"; `setStage` é compare-and-set sobre a etapa lida. Uma segunda chamada concorrente de `regenerateScene`, `generateAllScenes` ou `startAssembly` é **rejeitada** com `DomainError` em pt-BR; `regenerateAllScenes` concorrente vira no-op (pula cenas já em geração). `generateAllScenes` gera só as cenas sem tentativa aprovada (`approvedAttemptId` nulo; `updateScene` já limpa a aprovação da cena editada); se todas estão aprovadas, não passa por `generating`: faz um UPDATE guardado `script` → `review` (compare-and-set, pois `setStage` proíbe o salto) e não enfileira nada. `generationPlan` calcula `scenesToGenerate`/`estimatedSeconds` para a API e a UI. Os testes de falha de fila usam `vi.mock("@/queue/queue")` com `enqueue` delegando ao real e `mockRejectedValueOnce`.
+Atomicidade e concorrência: cada operação pública roda em `db.transaction`, com `enqueue` e `setStage` na MESMA transação (aceitam `DbOrTx`, ver Plano 1 `src/db/client.ts`). `regenerateScene`/`regenerateAllScenes` travam a linha da cena (`SELECT ... FOR UPDATE`) e reconferem "tentativa pendente"; `setStage` é compare-and-set sobre a etapa lida. Uma segunda chamada concorrente de `regenerateScene`, `generateAllScenes` ou `startAssembly` é **rejeitada** com `DomainError` em pt-BR; `regenerateAllScenes` concorrente vira no-op (pula cenas já em geração). `generateAllScenes` gera só as cenas que passam em `needsGeneration` (sem tentativa aprovada E sem tentativa `queued`/`generating`; `updateScene` já limpa a aprovação da cena editada); `setStage` recusa sair de `review` (exceto para `assembling`) enquanto houver tentativa em andamento, e, se só restarem cenas com tentativa em andamento, `generateAllScenes` vai para `generating` sem enfileirar nada; se todas estão aprovadas e nenhuma pendente, não passa por `generating`: faz um UPDATE guardado `script` → `review` (compare-and-set, pois `setStage` proíbe o salto) e não enfileira nada. `generationPlan(cenas, idsComTentativaPendente)` (mesma `needsGeneration`) calcula `scenesToGenerate`/`estimatedSeconds` para a API e a UI. Os testes de falha de fila usam `vi.mock("@/queue/queue")` com `enqueue` delegando ao real e `mockRejectedValueOnce`.
 
 ```ts
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
@@ -1786,12 +1859,27 @@ export function totalSeconds(list: { targetSeconds: number }[]): number {
   return list.reduce((sum, s) => sum + s.targetSeconds, 0);
 }
 
-// O que o próximo "gerar cenas" vai custar: só as cenas sem tentativa aprovada são geradas.
-export function generationPlan(list: { targetSeconds: number; approvedAttemptId: string | null }[]): {
+// Fonte única da regra: a cena precisa de geração se não tem clipe aprovado E não tem tentativa em andamento
+// (queued/generating). Uma tentativa em andamento já é a geração paga dessa cena: não se cria outra.
+export function needsGeneration(scene: { approvedAttemptId: string | null }, hasPendingAttempt: boolean): boolean {
+  return !scene.approvedAttemptId && !hasPendingAttempt;
+}
+
+export function sceneIdsWithPendingAttempt(list: { id: string; attempts: { status: string }[] }[]): Set<string> {
+  return new Set(
+    list.filter((s) => s.attempts.some((a) => a.status === "queued" || a.status === "generating")).map((s) => s.id),
+  );
+}
+
+// O que o próximo "gerar cenas" vai custar: só as cenas que passam em needsGeneration são geradas.
+export function generationPlan(
+  list: { id: string; targetSeconds: number; approvedAttemptId: string | null }[],
+  pendingSceneIds: ReadonlySet<string>,
+): {
   scenesToGenerate: number;
   estimatedSeconds: number;
 } {
-  const pending = list.filter((s) => !s.approvedAttemptId);
+  const pending = list.filter((s) => needsGeneration(s, pendingSceneIds.has(s.id)));
   return { scenesToGenerate: pending.length, estimatedSeconds: totalSeconds(pending) };
 }
 
@@ -1911,15 +1999,30 @@ async function lockScene(tx: DbOrTx, sceneId: string): Promise<Scene> {
   return row;
 }
 
+async function pendingSceneIdsOf(db: DbOrTx, projectId: string): Promise<Set<string>> {
+  const rows = await db
+    .select({ sceneId: sceneAttempts.sceneId })
+    .from(sceneAttempts)
+    .innerJoin(scenes, eq(sceneAttempts.sceneId, scenes.id))
+    .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])));
+  return new Set(rows.map((r) => r.sceneId));
+}
+
 export async function generateAllScenes(deps: Deps, projectId: string): Promise<void> {
   await deps.db.transaction(async (tx) => {
     const project = await getProject(tx, projectId);
     if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
     const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
     if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
-    // Só as cenas sem clipe aprovado são geradas: editar uma cena (updateScene) já limpou a aprovação dela.
-    const toGenerate = list.filter((s) => !s.approvedAttemptId);
+    // Só as cenas sem clipe aprovado e sem tentativa em andamento são geradas (needsGeneration).
+    const pendingIds = await pendingSceneIdsOf(tx, projectId);
+    const toGenerate = list.filter((s) => needsGeneration(s, pendingIds.has(s.id)));
     if (toGenerate.length === 0) {
+      if (pendingIds.size > 0) {
+        // Só restam gerações já em andamento (pagas): não enfileira nada; o worker leva o projeto à revisão ao terminar.
+        await setStage(tx, projectId, "generating");
+        return;
+      }
       // Tudo aprovado: nada a gerar, vai direto para a revisão (sem custo). Compare-and-set direto, pois
       // setStage não permite o salto script -> review.
       const [row] = await tx
@@ -3063,7 +3166,7 @@ import { concatClips, handleAssemble, onAssembleDead } from "@/modules/assembler
 import { makeTestClip, probe, withTempDir } from "@/modules/ffmpeg";
 import { PermanentError } from "@/queue/errors";
 import { enqueue, fail } from "@/queue/queue";
-import { getSnapshot } from "@/services/projects";
+import { getSnapshot, setStage } from "@/services/projects";
 import { makeClipBytes, makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAsset, seedAttempt, seedProject, seedScene } from "../helpers/seed";

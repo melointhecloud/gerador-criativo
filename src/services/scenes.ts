@@ -12,12 +12,27 @@ export function totalSeconds(list: { targetSeconds: number }[]): number {
   return list.reduce((sum, s) => sum + s.targetSeconds, 0);
 }
 
-// O que o próximo "gerar cenas" vai custar: só as cenas sem tentativa aprovada são geradas.
-export function generationPlan(list: { targetSeconds: number; approvedAttemptId: string | null }[]): {
+// Fonte única da regra: a cena precisa de geração se não tem clipe aprovado E não tem tentativa em andamento
+// (queued/generating). Uma tentativa em andamento já é a geração paga dessa cena: não se cria outra.
+export function needsGeneration(scene: { approvedAttemptId: string | null }, hasPendingAttempt: boolean): boolean {
+  return !scene.approvedAttemptId && !hasPendingAttempt;
+}
+
+export function sceneIdsWithPendingAttempt(list: { id: string; attempts: { status: string }[] }[]): Set<string> {
+  return new Set(
+    list.filter((s) => s.attempts.some((a) => a.status === "queued" || a.status === "generating")).map((s) => s.id),
+  );
+}
+
+// O que o próximo "gerar cenas" vai custar: só as cenas que passam em needsGeneration são geradas.
+export function generationPlan(
+  list: { id: string; targetSeconds: number; approvedAttemptId: string | null }[],
+  pendingSceneIds: ReadonlySet<string>,
+): {
   scenesToGenerate: number;
   estimatedSeconds: number;
 } {
-  const pending = list.filter((s) => !s.approvedAttemptId);
+  const pending = list.filter((s) => needsGeneration(s, pendingSceneIds.has(s.id)));
   return { scenesToGenerate: pending.length, estimatedSeconds: totalSeconds(pending) };
 }
 
@@ -137,15 +152,30 @@ async function lockScene(tx: DbOrTx, sceneId: string): Promise<Scene> {
   return row;
 }
 
+async function pendingSceneIdsOf(db: DbOrTx, projectId: string): Promise<Set<string>> {
+  const rows = await db
+    .select({ sceneId: sceneAttempts.sceneId })
+    .from(sceneAttempts)
+    .innerJoin(scenes, eq(sceneAttempts.sceneId, scenes.id))
+    .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])));
+  return new Set(rows.map((r) => r.sceneId));
+}
+
 export async function generateAllScenes(deps: Deps, projectId: string): Promise<void> {
   await deps.db.transaction(async (tx) => {
     const project = await getProject(tx, projectId);
     if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
     const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
     if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
-    // Só as cenas sem clipe aprovado são geradas: editar uma cena (updateScene) já limpou a aprovação dela.
-    const toGenerate = list.filter((s) => !s.approvedAttemptId);
+    // Só as cenas sem clipe aprovado e sem tentativa em andamento são geradas (needsGeneration).
+    const pendingIds = await pendingSceneIdsOf(tx, projectId);
+    const toGenerate = list.filter((s) => needsGeneration(s, pendingIds.has(s.id)));
     if (toGenerate.length === 0) {
+      if (pendingIds.size > 0) {
+        // Só restam gerações já em andamento (pagas): não enfileira nada; o worker leva o projeto à revisão ao terminar.
+        await setStage(tx, projectId, "generating");
+        return;
+      }
       // Tudo aprovado: nada a gerar, vai direto para a revisão (sem custo). Compare-and-set direto, pois
       // setStage não permite o salto script -> review.
       const [row] = await tx

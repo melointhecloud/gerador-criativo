@@ -171,6 +171,20 @@ describe("setStage", () => {
     expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("generating");
   });
 
+  it("não deixa sair de review com geração em andamento; libera quando todas terminaram", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const s = await seedScene(db, p.id, 0);
+    const a = await seedAttempt(db, s.id, { status: "done" });
+    const b = await seedAttempt(db, s.id, { status: "queued" });
+    await expect(setStage(db, p.id, "script")).rejects.toThrow(/Aguarde as gerações em andamento/);
+    await db.update(sceneAttempts).set({ status: "generating" }).where(eq(sceneAttempts.id, b.id));
+    await expect(setStage(db, p.id, "script")).rejects.toThrow(/Aguarde as gerações em andamento/);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+    await db.update(sceneAttempts).set({ status: "failed" }).where(eq(sceneAttempts.id, b.id));
+    expect(a.status).toBe("done");
+    expect((await setStage(db, p.id, "script")).stage).toBe("script");
+  });
+
   it("permite voltar de review para script", async () => {
     const p = await seedProject(db, { stage: "review" });
     expect((await setStage(db, p.id, "script")).stage).toBe("script");
