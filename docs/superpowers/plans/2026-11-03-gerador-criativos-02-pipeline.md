@@ -2681,11 +2681,59 @@ describe("handleAssemble", () => {
   });
 });
 
+
+describe("handleAssemble (robustez)", () => {
+  it("é idempotente: reexecutar com o projeto concluído não gera um segundo asset final", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await handleAssemble(m.deps, { projectId: p.id });
+    await handleAssemble(m.deps, { projectId: p.id });
+    const finals = await db.select().from(assets).where(eq(assets.kind, "final"));
+    expect(finals).toHaveLength(1);
+  });
+
+  it("ignora o job se o projeto não está em montagem", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await db.update(projects).set({ stage: "review" }).where(eq(projects.id, p.id));
+    await handleAssemble(m.deps, { projectId: p.id });
+    expect(await db.select().from(assets).where(eq(assets.kind, "final"))).toHaveLength(0);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+  });
+
+  it("remontar depois de voltar à revisão substitui o asset final (mesma chave)", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await handleAssemble(m.deps, { projectId: p.id });
+    await db.update(projects).set({ stage: "assembling" }).where(eq(projects.id, p.id));
+    await handleAssemble(m.deps, { projectId: p.id });
+    const finals = await db.select().from(assets).where(eq(assets.kind, "final"));
+    expect(finals).toHaveLength(1);
+    expect(finals[0]!.storageKey).toBe(`projects/${p.id}/final/final.mp4`);
+  });
+
+  it("falha de forma permanente, em português, se o arquivo do clipe sumiu do storage", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await db.update(assets).set({ storageKey: `projects/${p.id}/clips/sumiu.mp4` }).where(eq(assets.kind, "clip"));
+    await expect(handleAssemble(m.deps, { projectId: p.id })).rejects.toThrow(/arquivo do clipe da cena 1/);
+  });
+
+  it("falha de forma permanente se o asset do clipe aprovado não existe mais", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await db.delete(assets).where(eq(assets.kind, "clip"));
+    await expect(handleAssemble(m.deps, { projectId: p.id })).rejects.toBeInstanceOf(PermanentError);
+  });
+});
+
 describe("onAssembleDead", () => {
   it("devolve o projeto para a revisão", async () => {
     const { m, p } = await projectReadyToAssemble(1);
     await onAssembleDead(m.deps, { projectId: p.id }, "ffmpeg quebrou");
     expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+  });
+
+  it("não mexe em projeto que não está em montagem", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await db.update(projects).set({ stage: "done" }).where(eq(projects.id, p.id));
+    await onAssembleDead(m.deps, { projectId: p.id }, "x");
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("done");
   });
 });
 ```
@@ -2700,7 +2748,8 @@ Expected: FAIL — módulo não encontrado.
 ```ts
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
+import type { DbOrTx } from "@/db/client";
 import { assets, projects, sceneAttempts, scenes } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { PermanentError } from "@/queue/errors";
@@ -2743,10 +2792,18 @@ export async function concatClips(inputs: ClipInput[], out: string): Promise<voi
   await runFfmpeg(args);
 }
 
+// Mesma ordem de locks das outras transações do pipeline: linha do projeto primeiro.
+async function lockProject(tx: DbOrTx, projectId: string) {
+  const [row] = await tx.select().from(projects).where(eq(projects.id, projectId)).for("update");
+  return row;
+}
+
 export async function handleAssemble(deps: Deps, payload: { projectId: string }): Promise<void> {
   const { db, storage } = deps;
   const [project] = await db.select().from(projects).where(eq(projects.id, payload.projectId));
   if (!project) throw new PermanentError("Projeto não encontrado");
+  // Job reentregue (já concluído) ou projeto que voltou para a revisão: nada a fazer, sem rodar ffmpeg.
+  if (project.stage !== "assembling") return;
 
   const sceneRows = await db
     .select()
@@ -2758,14 +2815,29 @@ export async function handleAssemble(deps: Deps, payload: { projectId: string })
   const finalBytes = await withTempDir(async (dir) => {
     const inputs: ClipInput[] = [];
     for (const [i, scene] of sceneRows.entries()) {
-      if (!scene.approvedAttemptId) throw new PermanentError(`A cena ${i + 1} não tem clipe aprovado`);
-      const [attempt] = await db.select().from(sceneAttempts).where(eq(sceneAttempts.id, scene.approvedAttemptId));
-      if (!attempt?.clipAssetId) throw new PermanentError(`A cena ${i + 1} não tem clipe pronto`);
+      const n = i + 1;
+      if (!scene.approvedAttemptId) throw new PermanentError(`A cena ${n} não tem clipe aprovado`);
+      const [attempt] = await db
+        .select()
+        .from(sceneAttempts)
+        .where(and(eq(sceneAttempts.id, scene.approvedAttemptId), eq(sceneAttempts.sceneId, scene.id)));
+      if (!attempt?.clipAssetId) throw new PermanentError(`A cena ${n} não tem clipe pronto`);
       const [clip] = await db.select().from(assets).where(eq(assets.id, attempt.clipAssetId));
-      if (!clip) throw new PermanentError(`Clipe da cena ${i + 1} não encontrado`);
+      if (!clip) throw new PermanentError(`Clipe da cena ${n} não encontrado`);
+      let bytes: Buffer;
+      try {
+        bytes = await storage.get(clip.storageKey);
+      } catch {
+        throw new PermanentError(`O arquivo do clipe da cena ${n} não foi encontrado no armazenamento. Gere a cena novamente.`);
+      }
       const file = path.join(dir, `${i}.mp4`);
-      await writeFile(file, await storage.get(clip.storageKey));
-      const p = await probe(file);
+      await writeFile(file, bytes);
+      let p;
+      try {
+        p = await probe(file);
+      } catch {
+        throw new PermanentError(`O clipe da cena ${n} está corrompido. Gere a cena novamente.`);
+      }
       inputs.push({ file, hasAudio: p.hasAudio, durationSeconds: p.durationSeconds });
     }
     const out = path.join(dir, "final.mp4");
@@ -2774,32 +2846,49 @@ export async function handleAssemble(deps: Deps, payload: { projectId: string })
     return { bytes: await readFile(out), durationSeconds: measured.durationSeconds };
   });
 
-  const key = `projects/${project.id}/final/${Date.now()}.mp4`;
+  // Chave determinística: reexecutar sobrescreve o mesmo arquivo em vez de vazar um novo.
+  const key = `projects/${project.id}/final/final.mp4`;
   await storage.put(key, finalBytes.bytes, "video/mp4");
-  await db.insert(assets).values({
-    projectId: project.id,
-    kind: "final",
-    storageKey: key,
-    mimeType: "video/mp4",
-    durationSeconds: finalBytes.durationSeconds,
+  // Asset final + etapa "done" numa transação, sob o lock do projeto: reexecuções concorrentes não duplicam.
+  await db.transaction(async (tx) => {
+    const locked = await lockProject(tx, project.id);
+    if (!locked || locked.stage !== "assembling") return;
+    await tx.delete(assets).where(and(eq(assets.projectId, project.id), eq(assets.kind, "final")));
+    await tx.insert(assets).values({
+      projectId: project.id,
+      kind: "final",
+      storageKey: key,
+      mimeType: "video/mp4",
+      durationSeconds: finalBytes.durationSeconds,
+    });
+    // "assembling" é terminal para canTransition; o CAS abaixo é a transição legítima para "done".
+    await tx
+      .update(projects)
+      .set({ stage: "done", updatedAt: new Date() })
+      .where(and(eq(projects.id, project.id), eq(projects.stage, "assembling")));
   });
-  await db.update(projects).set({ stage: "done", updatedAt: new Date() }).where(eq(projects.id, project.id));
 }
 
-// Se a montagem esgotar as tentativas, o usuário volta à revisão para tentar de novo.
+// Montagem morta (erro permanente, tentativas esgotadas ou job reaproveitado): "assembling" não tem saída por
+// setStage, então devolvemos o projeto à revisão aqui, com compare-and-set. A mensagem fica em jobs.error (pelo runner).
 export async function onAssembleDead(deps: Deps, payload: { projectId: string }, message: string): Promise<void> {
   console.error(`montagem falhou para o projeto ${payload.projectId}: ${message}`);
-  await deps.db
-    .update(projects)
-    .set({ stage: "review", updatedAt: new Date() })
-    .where(eq(projects.id, payload.projectId));
+  await deps.db.transaction(async (tx) => {
+    await lockProject(tx, payload.projectId);
+    await tx
+      .update(projects)
+      .set({ stage: "review", updatedAt: new Date() })
+      .where(and(eq(projects.id, payload.projectId), eq(projects.stage, "assembling")));
+  });
 }
 ```
+
+Notas (divergências em relação à primeira versão do plano): o handler ignora o job se o projeto não está em `assembling` (idempotência); o asset final (chave fixa `projects/<id>/final/final.mp4`) e a etapa `done` são gravados numa só transação sob `SELECT ... FOR UPDATE` do projeto; clipe ausente/corrompido vira `PermanentError` em português; `onAssembleDead` usa UPDATE condicional (`assembling` -> `review`) pois `canTransition` não deixa sair de `assembling`. A mensagem do erro fica em `jobs.error` (gravada pelo runner, Task 10).
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/assembler.test.ts && pnpm typecheck`
-Expected: 4 testes PASS; typecheck limpo.
+Expected: 10 testes PASS; typecheck limpo.
 
 - [ ] **Step 5: Commit**
 
