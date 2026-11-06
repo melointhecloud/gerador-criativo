@@ -3082,6 +3082,25 @@ describe("runOnce", () => {
     expect(onDead).toHaveBeenCalledWith({ projectId: "p1" }, "Job travado: tentativas esgotadas");
     expect((await jobOf(stuck.id)).status).toBe("failed");
   });
+
+  it("onDead que lança não derruba o runner", async () => {
+    const j = await enqueue(db, "assemble", {});
+    await expect(
+      runOnce(db, {
+        assemble: {
+          run: async () => {
+            throw new PermanentError("sem cenas");
+          },
+          onDead: async () => {
+            throw new Error("boom");
+          },
+        },
+      }),
+    ).resolves.toBe(true);
+    const after = await jobOf(j.id);
+    expect(after.status).toBe("failed");
+    expect(after.error).toBe("sem cenas");
+  });
 });
 ```
 
@@ -3095,7 +3114,7 @@ Expected: FAIL — módulo não encontrado.
 ```ts
 import type { Db } from "@/db/client";
 import { PermanentError, RetryLater } from "@/queue/errors";
-import { claim, complete, fail, reclaimStale, release } from "@/queue/queue";
+import { claim, complete, fail, reclaimStale, release, type Job } from "@/queue/queue";
 import { ProviderError } from "@/providers/types";
 
 export type Handler = {
@@ -3103,6 +3122,15 @@ export type Handler = {
   onDead?(payload: Record<string, unknown>, message: string): Promise<void>;
 };
 export type Handlers = Record<string, Handler>;
+
+// Um onDead que falha nunca pode derrubar o loop: loga e segue.
+async function runOnDead(handlers: Handlers, job: Job, message: string): Promise<void> {
+  try {
+    await handlers[job.type]?.onDead?.(job.payload, message);
+  } catch (err) {
+    console.error(`onDead falhou para o job ${job.id}:`, err);
+  }
+}
 
 // Executa no máximo um job. Devolve true se havia job (para o loop não dormir à toa).
 export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
@@ -3117,7 +3145,6 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
 
   try {
     await handler.run(job.payload);
-    await complete(db, job.id);
   } catch (e) {
     if (e instanceof RetryLater) {
       await release(db, job, e.delayMs);
@@ -3126,14 +3153,12 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
     const message = e instanceof Error ? e.message : String(e);
     const retryable = !(e instanceof PermanentError) && !(e instanceof ProviderError && !e.retryable);
     const outcome = await fail(db, job, message, retryable); // grava a mensagem em jobs.error; getSnapshot a lê (assembleError)
-    if (outcome === "dead" && handler.onDead) {
-      try {
-        await handler.onDead(job.payload, message);
-      } catch (err) {
-        console.error(`onDead falhou para o job ${job.id}:`, err);
-      }
-    }
+    if (outcome === "dead") await runOnDead(handlers, job, message);
+    return true;
   }
+  // Fora do try: se o complete falhar (queda do banco), o job NÃO é tratado como falha do handler
+  // (não reexecuta por engano); fica `running` e o recoverStaleJobs o devolve à fila.
+  await complete(db, job.id);
   return true;
 }
 
@@ -3141,13 +3166,7 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
 // recebem o mesmo `onDead` do caminho normal, para limpar as linhas de domínio.
 export async function recoverStaleJobs(db: Db, handlers: Handlers, olderThanMs: number) {
   const { requeued, dead } = await reclaimStale(db, olderThanMs);
-  for (const job of dead) {
-    try {
-      await handlers[job.type]?.onDead?.(job.payload, job.error ?? "Job travado: tentativas esgotadas");
-    } catch (err) {
-      console.error(`onDead falhou para o job ${job.id}:`, err);
-    }
-  }
+  for (const job of dead) await runOnDead(handlers, job, job.error ?? "Job travado: tentativas esgotadas");
   return { requeued, dead: dead.length };
 }
 ```
@@ -3181,19 +3200,40 @@ export function buildHandlers(deps: Deps): Handlers {
 
 - [ ] **Step 5: Implementar `src/worker/main.ts`**
 
-(Depende de `createProviders`, criado na Task 11; o typecheck desta etapa só fecha depois dela.)
+(`createProviders` só nasce na Task 11: até lá `main.ts` traz um seam local marcado `TODO(Task 11)` que suporta `PROVIDER=fake` com fakes mínimos e lança erro em português para `gemini`. Ao fazer a Task 11, apague o seam e importe `createProviders` de `@/providers`. Divergências em relação à primeira versão: `complete()` fica fora do `try` (falha de banco não reexecuta o handler); `onDead` centralizado em `runOnDead`; recuperação de travados também na partida; segundo sinal força saída; `sql.end()` no encerramento.)
 
 ```ts
+import type { Env } from "@/config/env";
 import { loadEnv } from "@/config/env";
 import { createDb } from "@/db/client";
 import type { Deps } from "@/deps";
-import { createProviders } from "@/providers";
+import { FakeImageModel, FakeTextModel, FakeVideoModel } from "@/providers/fake";
+import { type Providers } from "@/providers/types";
 import { createStorage } from "@/storage";
 import { buildHandlers } from "./handlers";
 import { recoverStaleJobs, runOnce } from "./runner";
 
+// TODO(Task 11): remover este seam e importar `createProviders` de "@/providers" (fábrica real).
+// Até lá só `PROVIDER=fake` funciona, e o clipe falso não é um MP4 válido (a montagem real falharia).
+async function createProviders(env: Env): Promise<Providers> {
+  if (env.PROVIDER !== "fake") {
+    throw new Error("PROVIDER=gemini ainda não está disponível: a fábrica de providers reais é a Task 11.");
+  }
+  return {
+    text: new FakeTextModel([]),
+    image: new FakeImageModel(),
+    video: new FakeVideoModel({ clip: Buffer.from("fake-clip") }),
+  };
+}
+
+// Job `running` há mais que isso é considerado órfão. Jobs são curtos (a geração de vídeo usa
+// RetryLater); a montagem com ffmpeg é o mais longo e deve ficar bem abaixo deste limite.
+const STALE_AFTER_MS = 10 * 60_000;
+const RECLAIM_EVERY_MS = 60_000;
+const IDLE_POLL_MS = 2_000;
+
 const env = loadEnv();
-const { db } = createDb(env.DATABASE_URL, env.WORKER_CONCURRENCY + 2);
+const { db, sql } = createDb(env.DATABASE_URL, env.WORKER_CONCURRENCY + 2);
 const deps: Deps = {
   db,
   storage: createStorage(env),
@@ -3205,6 +3245,10 @@ const handlers = buildHandlers(deps);
 let stopping = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
+    if (stopping) {
+      console.log(`${sig} recebido de novo, saindo imediatamente`);
+      process.exit(1);
+    }
     console.log(`${sig} recebido, encerrando após os jobs em andamento`);
     stopping = true;
   });
@@ -3218,30 +3262,33 @@ async function loop(n: number) {
       console.error(`loop ${n}:`, e);
       return false;
     });
-    if (!worked) await sleep(2_000);
+    if (!worked) await sleep(IDLE_POLL_MS);
   }
 }
 
 // Jobs presos em "running" por um worker que morreu voltam para a fila, ou falham com onDead se esgotaram as tentativas (rodar uma única réplica do worker).
-const reclaimTimer = setInterval(() => {
-  recoverStaleJobs(db, handlers, 10 * 60_000)
+function reclaim() {
+  return recoverStaleJobs(db, handlers, STALE_AFTER_MS)
     .then(({ requeued, dead }) => {
       if (requeued) console.log(`${requeued} job(s) travado(s) devolvido(s) à fila`);
       if (dead) console.log(`${dead} job(s) travado(s) marcado(s) como failed (onDead executado)`);
     })
     .catch((e) => console.error("recoverStaleJobs:", e));
-}, 60_000);
+}
+await reclaim(); // na partida: recupera o que o worker anterior deixou pendurado
+const reclaimTimer = setInterval(reclaim, RECLAIM_EVERY_MS);
 
 console.log(`worker iniciado (provider=${env.PROVIDER}, concorrência=${env.WORKER_CONCURRENCY})`);
 await Promise.all(Array.from({ length: env.WORKER_CONCURRENCY }, (_, i) => loop(i)));
 clearInterval(reclaimTimer);
+await sql.end({ timeout: 5 });
 process.exit(0);
 ```
 
 - [ ] **Step 6: Rodar os testes do runner**
 
 Run: `pnpm vitest run tests/worker/runner.test.ts`
-Expected: 8 testes PASS.
+Expected: 9 testes PASS.
 
 - [ ] **Step 7: Commit**
 
