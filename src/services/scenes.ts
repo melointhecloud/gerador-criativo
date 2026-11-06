@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db, DbOrTx } from "@/db/client";
-import { assets, characters, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
+import { assets, characters, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { buildScenePrompt } from "@/modules/prompt";
 import { draftScript } from "@/modules/script-planner";
@@ -48,6 +48,10 @@ export async function planProjectScript(deps: Deps, projectId: string, feedback?
   const assetByLabel = new Map(labeled.map((l) => [l.label.toLowerCase(), l.assetId]));
 
   await db.transaction(async (tx) => {
+    // A chamada ao modelo ficou fora da transação: trava o projeto (primeiro, como nos demais serviços) e confere
+    // a etapa de novo. Sem isso, um generateAllScenes concluído nesse intervalo teria as cenas apagadas pelo replano.
+    const [locked] = await tx.select().from(projects).where(eq(projects.id, projectId)).for("update");
+    if (!locked || locked.stage !== "script") throw new DomainError("O roteiro só pode ser planejado na etapa de roteiro");
     await tx.delete(scenes).where(eq(scenes.projectId, projectId));
     for (const [position, d] of drafted.entries()) {
       const [scene] = await tx

@@ -959,6 +959,14 @@ describe("setStage", () => {
     await expect(setStage(db, p.id, "review")).rejects.toThrow(/Não é possível/);
   });
 
+  it("não deixa sair de generating (evita um segundo conjunto de tentativas pagas)", async () => {
+    const p = await seedProject(db, { stage: "generating" });
+    for (const target of ["script", "review"] as const) {
+      await expect(setStage(db, p.id, target)).rejects.toThrow(/Aguarde a geração das cenas terminar/);
+    }
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("generating");
+  });
+
   it("permite voltar de review para script", async () => {
     const p = await seedProject(db, { stage: "review" });
     expect((await setStage(db, p.id, "script")).stage).toBe("script");
@@ -1156,6 +1164,9 @@ async function assertCanEnter(db: DbOrTx, project: Project, target: Stage): Prom
 // Dentro de uma transação, o UPDATE também segura o lock da linha do projeto até o commit.
 export async function setStage(db: DbOrTx, projectId: string, target: Stage): Promise<Project> {
   const project = await getProject(db, projectId);
+  // Só o worker tira o projeto de `generating` (advanceToReviewIfIdle). Sair daqui permitiria um novo
+  // generateAllScenes e, com ele, um segundo conjunto de tentativas pagas.
+  if (project.stage === "generating") throw new DomainError("Aguarde a geração das cenas terminar antes de mudar de etapa.");
   if (!canTransition(project.mode, project.stage, target)) {
     throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
   }
@@ -1339,6 +1350,24 @@ describe("planProjectScript", () => {
     cleanup = m.cleanup;
     const p = await seedProject(db, { stage: "review" });
     await expect(planProjectScript(m.deps, p.id)).rejects.toThrow(/etapa de roteiro/);
+  });
+
+  it("se a geração começa durante a chamada ao modelo, o replanejamento é rejeitado e as cenas geradas sobrevivem", async () => {
+    const { m, p } = await projectWithScript();
+    const inner = m.deps.providers.text;
+    // Simula o intercalamento: enquanto o LLM "pensa", outra requisição aprova o roteiro e gera as cenas.
+    m.deps.providers.text = {
+      async generateJson(args) {
+        await generateAllScenes(m.deps, p.id);
+        return inner.generateJson(args);
+      },
+    };
+    (m.text as unknown as { responses: unknown[] }).responses.push(draft());
+    await expect(planProjectScript(m.deps, p.id)).rejects.toThrow(/etapa de roteiro/);
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("generating");
+    expect(snap.scenes).toHaveLength(2);
+    expect(await db.select().from(sceneAttempts)).toHaveLength(2);
   });
 });
 
@@ -1578,7 +1607,7 @@ Atomicidade e concorrência: cada operação pública roda em `db.transaction`, 
 ```ts
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db, DbOrTx } from "@/db/client";
-import { assets, characters, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
+import { assets, characters, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { buildScenePrompt } from "@/modules/prompt";
 import { draftScript } from "@/modules/script-planner";
@@ -1626,6 +1655,10 @@ export async function planProjectScript(deps: Deps, projectId: string, feedback?
   const assetByLabel = new Map(labeled.map((l) => [l.label.toLowerCase(), l.assetId]));
 
   await db.transaction(async (tx) => {
+    // A chamada ao modelo ficou fora da transação: trava o projeto (primeiro, como nos demais serviços) e confere
+    // a etapa de novo. Sem isso, um generateAllScenes concluído nesse intervalo teria as cenas apagadas pelo replano.
+    const [locked] = await tx.select().from(projects).where(eq(projects.id, projectId)).for("update");
+    if (!locked || locked.stage !== "script") throw new DomainError("O roteiro só pode ser planejado na etapa de roteiro");
     await tx.delete(scenes).where(eq(scenes.projectId, projectId));
     for (const [position, d] of drafted.entries()) {
       const [scene] = await tx
@@ -1901,8 +1934,12 @@ describe("handleGenerateScene", () => {
 });
 
 describe("teto de espera por geração pendente", () => {
+  // Simula uma geração já iniciada (providerRef salvo) há `ms`: o teto conta a partir de updatedAt.
   const ageAttempt = (id: string, ms: number) =>
-    db.update(sceneAttempts).set({ createdAt: new Date(Date.now() - ms) }).where(eq(sceneAttempts.id, id));
+    db
+      .update(sceneAttempts)
+      .set({ providerRef: "fake-1", status: "generating", updatedAt: new Date(Date.now() - ms) })
+      .where(eq(sceneAttempts.id, id));
 
   it("passou do teto: falha com mensagem de tempo esgotado, sem retry, e avança o projeto", async () => {
     const { m, p, attempt } = await setup({ video: { pendingPolls: 1000 } });
@@ -1917,6 +1954,31 @@ describe("teto de espera por geração pendente", () => {
   it("dentro do teto: continua pedindo para voltar", async () => {
     const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
     await ageAttempt(attempt.id, MAX_GENERATION_WAIT_MS - 5 * 60_000);
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+    expect((await attemptOf(attempt.id)).status).toBe("generating");
+  });
+});
+
+describe("teto de espera: relógio do providerRef", () => {
+  const old = (id: string, patch: Partial<typeof sceneAttempts.$inferInsert>) =>
+    db.update(sceneAttempts).set(patch).where(eq(sceneAttempts.id, id));
+
+  it("tentativa criada há 2h mas iniciada agora: não falha, pede para voltar", async () => {
+    const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    const longAgo = new Date(Date.now() - 2 * 3600_000);
+    await old(attempt.id, { createdAt: longAgo, updatedAt: longAgo }); // ficou na fila; providerRef ainda nulo
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+    expect(m.video.starts).toHaveLength(1);
+    const a = await attemptOf(attempt.id);
+    expect(a.status).toBe("generating");
+    expect(a.providerRef).toBe("fake-1");
+    // Próxima execução (providerRef recém-salvo): continua dentro do teto.
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+  });
+
+  it("createdAt antigo com providerRef recente: não falha", async () => {
+    const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    await old(attempt.id, { createdAt: new Date(Date.now() - 2 * 3600_000), providerRef: "fake-1", status: "generating" });
     await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
     expect((await attemptOf(attempt.id)).status).toBe("generating");
   });
@@ -2002,7 +2064,7 @@ import { advanceToReviewIfIdle } from "@/services/projects";
 import { probe, withTempDir } from "./ffmpeg";
 
 const POLL_DELAY_MS = 10_000;
-// Teto de espera por uma geração que continua "pending": passou disso, a tentativa falha e a cena pode ser regerada.
+// Teto de espera por uma geração que continua "pending" (contado desde que o providerRef foi salvo): passou disso, a tentativa falha e a cena pode ser regerada.
 export const MAX_GENERATION_WAIT_MS = 30 * 60_000;
 const TERMINAL: AttemptStatus[] = ["done", "failed", "blocked"];
 
@@ -2058,6 +2120,7 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
 
   try {
     let providerRef = attempt.providerRef;
+    let justStarted = false;
     if (!providerRef) {
       const references = await loadReferences(deps, attempt.referenceAssetIds);
       const started = await providers.video.start({
@@ -2066,13 +2129,18 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
         targetSeconds: scene.targetSeconds,
       });
       providerRef = started.providerRef;
+      justStarted = true;
       // Persistir imediatamente, antes de qualquer espera: se o worker reiniciar, o polling continua daqui.
       await patchAttempt(db, attempt.id, { providerRef, status: "generating" });
     }
 
     const result = await providers.video.poll({ providerRef });
     if (result.state === "pending") {
-      if (Date.now() - attempt.createdAt.getTime() > MAX_GENERATION_WAIT_MS) {
+      // O relógio do teto é o do último `providerRef` salvo (patchAttempt atualiza updatedAt; nada mais escreve em
+      // scene_attempts enquanto a geração está pendente). Medir de createdAt descartaria uma geração recém-paga
+      // de uma tentativa que ficou muito tempo na fila ou foi reiniciada. Na execução que acabou de chamar start()
+      // o teto não se aplica.
+      if (!justStarted && Date.now() - attempt.updatedAt.getTime() > MAX_GENERATION_WAIT_MS) {
         await finish(deps, scene.projectId, attempt.id, {
           status: "failed",
           error: "A geração demorou mais de 30 minutos e foi interrompida (tempo esgotado). Regere a cena.",
@@ -2144,7 +2212,7 @@ export async function onGenerateSceneDead(deps: Deps, payload: { attemptId: stri
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/scene-generator.test.ts && pnpm typecheck`
-Expected: 11 testes PASS; typecheck limpo.
+Expected: 16 testes PASS; typecheck limpo.
 
 - [ ] **Step 5: Commit**
 
@@ -2168,7 +2236,8 @@ git commit -m "feat(modules): resumable scene generation handler"
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { assets, characters, jobs } from "@/db/schema";
+import { assets, characters, jobs, sceneReferences } from "@/db/schema";
+import { DomainError } from "@/services/errors";
 import { handleGenerateCharacter, onGenerateCharacterDead } from "@/modules/character-designer";
 import {
   addCharacter, approveCharacter, proposeProjectCharacters, regenerateCharacterImage, removeCharacter, updateCharacter,
@@ -2176,7 +2245,7 @@ import {
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { ProviderError } from "@/providers/types";
-import { seedAsset, seedCharacter, seedProject } from "../helpers/seed";
+import { seedAsset, seedCharacter, seedProject, seedScene } from "../helpers/seed";
 
 beforeEach(resetDb);
 let cleanup: () => Promise<void>;
@@ -2344,6 +2413,48 @@ describe("handleGenerateCharacter", () => {
     expect((await charOf(c.id)).assetId).not.toBe(old.id);
   });
 
+  it("regerar mantém o vínculo das cenas já planejadas, agora com a imagem nova", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const old = await seedAsset(db, p.id, { kind: "character", label: "Maria" });
+    const c = await seedCharacter(db, p.id, { name: "Maria", imageStatus: "pending", assetId: old.id });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [old.id] });
+    const s2 = await seedScene(db, p.id, 1, { assetIds: [old.id] });
+    await handleGenerateCharacter(m.deps, { characterId: c.id });
+    const fresh = (await charOf(c.id)).assetId!;
+    expect(fresh).not.toBe(old.id);
+    expect(await db.select().from(assets).where(eq(assets.id, old.id))).toHaveLength(0);
+    const links = await db.select().from(sceneReferences);
+    expect(links.map((l) => [l.sceneId, l.assetId]).sort()).toEqual([[s1.id, fresh], [s2.id, fresh]].sort());
+  });
+
+  it("handler e serviço concorrentes no mesmo personagem não dão deadlock (ordem de locks: projeto, depois personagem)", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    for (let round = 0; round < 15; round++) {
+      const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+      const c = await seedCharacter(db, p.id, { name: `Maria${round}`, imageStatus: "pending" });
+      const results = await Promise.allSettled([
+        handleGenerateCharacter(m.deps, { characterId: c.id }),
+        updateCharacter(m.deps, c.id, { name: `Mariana${round}` }),
+        approveCharacter(db, c.id),
+      ]);
+      for (const r of results) {
+        if (r.status === "rejected") {
+          // approveCharacter pode legitimamente perder a corrida ("espere a imagem"); deadlock nunca.
+          const e = r.reason as { code?: string; cause?: { code?: string } };
+          expect(e.cause?.code ?? e.code).not.toBe("40P01");
+          expect(r.reason).toBeInstanceOf(DomainError);
+        }
+      }
+      const after = await charOf(c.id);
+      expect(after.imageStatus).toBe("ready");
+      const [asset] = await db.select().from(assets).where(eq(assets.id, after.assetId!));
+      expect(asset!.label).toBe(after.name); // rótulo da imagem acompanha o nome em qualquer ordem
+    }
+  });
+
   it("é idempotente: reentrega depois de pronto não gera nem duplica assets", async () => {
     const m = await makeDeps();
     cleanup = m.cleanup;
@@ -2422,7 +2533,7 @@ Substituir os imports no topo do arquivo por (o handler só grava se o personage
 ```ts
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { assets, characters } from "@/db/schema";
+import { assets, characters, projects, sceneReferences } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { PermanentError } from "@/queue/errors";
 import { ProviderError, type TextModel } from "@/providers/types";
@@ -2457,6 +2568,10 @@ export async function handleGenerateCharacter(deps: Deps, payload: { characterId
   const key = `projects/${character.projectId}/characters/${character.id}-${Date.now()}.${EXT[image.mimeType] ?? "png"}`;
   await storage.put(key, image.bytes, image.mimeType);
   await db.transaction(async (tx) => {
+    // Ordem de locks igual à dos serviços (projeto primeiro, depois personagem): inserir o asset toma um lock
+    // compartilhado na linha do projeto (FK), e travar o personagem antes disso fecharia um ciclo com
+    // updateCharacter/regenerateCharacterImage (deadlock 40P01).
+    await tx.select({ id: projects.id }).from(projects).where(eq(projects.id, character.projectId)).for("update");
     const [current] = await tx.select().from(characters).where(eq(characters.id, character.id)).for("update");
     if (!current || current.imageStatus !== "pending" || current.description !== character.description) return;
     const [asset] = await tx
@@ -2473,7 +2588,12 @@ export async function handleGenerateCharacter(deps: Deps, payload: { characterId
       .update(characters)
       .set({ assetId: asset!.id, imageStatus: "ready", imageError: null })
       .where(eq(characters.id, current.id));
-    if (current.assetId) await tx.delete(assets).where(eq(assets.id, current.assetId));
+    if (current.assetId) {
+      // scene_references.asset_id tem ON DELETE CASCADE: sem repontar, apagar a imagem antiga desvincularia o
+      // personagem das cenas já planejadas (e a próxima geração paga perderia a referência de identidade).
+      await tx.update(sceneReferences).set({ assetId: asset!.id }).where(eq(sceneReferences.assetId, current.assetId));
+      await tx.delete(assets).where(eq(assets.id, current.assetId));
+    }
   });
 }
 
@@ -2997,7 +3117,7 @@ git commit -m "feat(modules): ffmpeg assembler normalizing and concatenating app
 
 **Files:**
 - Create: `src/worker/runner.ts`, `src/worker/handlers.ts`, `src/worker/main.ts`
-- Test: `tests/worker/runner.test.ts`
+- Test: `tests/worker/runner.test.ts`, `tests/worker/flow.test.ts`
 
 - [ ] **Step 1: Escrever os testes do runner**
 
@@ -3272,9 +3392,11 @@ import type { Deps } from "@/deps";
 import { onAssembleDead, handleAssemble } from "@/modules/assembler";
 import { handleGenerateCharacter, onGenerateCharacterDead } from "@/modules/character-designer";
 import { handleGenerateScene, onGenerateSceneDead } from "@/modules/scene-generator";
-import type { Handlers } from "./runner";
+import type { JobType } from "@/queue/queue";
+import type { Handler } from "./runner";
 
-export function buildHandlers(deps: Deps): Handlers {
+// Record<JobType, ...>: adicionar um tipo de job sem handler não compila.
+export function buildHandlers(deps: Deps): Record<JobType, Handler> {
   return {
     generate_scene: {
       run: (p) => handleGenerateScene(deps, p as { attemptId: string }),
@@ -3294,31 +3416,16 @@ export function buildHandlers(deps: Deps): Handlers {
 
 - [ ] **Step 5: Implementar `src/worker/main.ts`**
 
-(`createProviders` só nasce na Task 11: até lá `main.ts` traz um seam local marcado `TODO(Task 11)` que suporta `PROVIDER=fake` com fakes mínimos e lança erro em português para `gemini`. Ao fazer a Task 11, apague o seam e importe `createProviders` de `@/providers`. Divergências em relação à primeira versão: `complete()` fica fora do `try` (falha de banco não reexecuta o handler); `onDead` centralizado em `runOnDead`; recuperação de travados também na partida; segundo sinal força saída; `sql.end()` no encerramento.)
+(`createProviders` vem de `@/providers` (Task 11, Steps 7–8: hoje só o provider de desenvolvimento `PROVIDER=fake`; `gemini` lança erro em português até o spike). Divergências em relação à primeira versão: `complete()` fica fora do `try` (falha de banco não reexecuta o handler); `onDead` centralizado em `runOnDead`; recuperação de travados também na partida; segundo sinal força saída; `sql.end()` no encerramento.)
 
 ```ts
-import type { Env } from "@/config/env";
 import { loadEnv } from "@/config/env";
 import { createDb } from "@/db/client";
 import type { Deps } from "@/deps";
-import { FakeImageModel, FakeTextModel, FakeVideoModel } from "@/providers/fake";
-import { type Providers } from "@/providers/types";
+import { createProviders } from "@/providers";
 import { createStorage } from "@/storage";
 import { buildHandlers } from "./handlers";
 import { recoverStaleJobs, runOnce } from "./runner";
-
-// TODO(Task 11): remover este seam e importar `createProviders` de "@/providers" (fábrica real).
-// Até lá só `PROVIDER=fake` funciona, e o clipe falso não é um MP4 válido (a montagem real falharia).
-async function createProviders(env: Env): Promise<Providers> {
-  if (env.PROVIDER !== "fake") {
-    throw new Error("PROVIDER=gemini ainda não está disponível: a fábrica de providers reais é a Task 11.");
-  }
-  return {
-    text: new FakeTextModel([]),
-    image: new FakeImageModel(),
-    video: new FakeVideoModel({ clip: Buffer.from("fake-clip") }),
-  };
-}
 
 // Job `running` há mais que isso é considerado órfão. Deve superar com folga o timeout do ffmpeg
 // (FFMPEG_TIMEOUT_MS = 10 min) somado às transferências de/para o storage, senão uma montagem
@@ -3385,7 +3492,118 @@ process.exit(0);
 Run: `pnpm vitest run tests/worker/runner.test.ts`
 Expected: 11 testes PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Teste de fluxo ponta a ponta (spec §8: o fluxo inteiro roda sem gastar crédito)**
+
+`tests/worker/flow.test.ts` percorre o UGC inteiro com providers falsos e um clipe real (`makeClipBytes`): briefing, referência, roteiro (texto falso com 2 cenas), geração (drenando a fila com `runOnce(db, buildHandlers(deps))`, trazendo o `run_at` dos jobs adiados para o passado), revisão, aprovação, montagem e `done` com o MP4 final sondado (vertical, com áudio, duração próxima da soma dos clipes). Um segundo caso cobre cena bloqueada pelo provider: a outra conclui e o projeto chega em `review`.
+
+```ts
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
+import { assets, jobs, sceneAttempts } from "@/db/schema";
+import { probe, withTempDir } from "@/modules/ffmpeg";
+import { addReference, createProject, getSnapshot, setStage, updateBriefing } from "@/services/projects";
+import { approveAttempt, generateAllScenes, planProjectScript, startAssembly } from "@/services/scenes";
+import { buildHandlers } from "@/worker/handlers";
+import { runOnce } from "@/worker/runner";
+import { makeClipBytes, makeDeps } from "../helpers/deps";
+import { resetDb, testDb as db } from "../helpers/db";
+
+// Spec §8: o fluxo inteiro (briefing -> roteiro -> geração -> revisão -> montagem) roda sem gastar crédito.
+beforeEach(resetDb);
+let cleanup: () => Promise<void>;
+afterEach(async () => cleanup?.());
+
+const script = {
+  scenes: [
+    { dialogue: "Olha o que eu achei", visualPrompt: "Close no produto", targetSeconds: 3, referenceLabels: ["produto"] },
+    { dialogue: "Funciona de verdade", visualPrompt: "Plano médio sorrindo", targetSeconds: 3, referenceLabels: [] },
+  ],
+};
+
+// Roda o worker até a fila esvaziar. Jobs adiados (RetryLater) têm o run_at trazido para o passado,
+// em vez de esperar os 10 s reais do polling.
+async function drain(handlers: ReturnType<typeof buildHandlers>) {
+  for (let i = 0; i < 100; i++) {
+    await db.update(jobs).set({ runAt: new Date(Date.now() - 1000) }).where(eq(jobs.status, "queued"));
+    if (!(await runOnce(db, handlers))) return;
+  }
+  throw new Error("a fila não esvaziou em 100 iterações");
+}
+
+async function ugcUntilGenerated(m: Awaited<ReturnType<typeof makeDeps>>) {
+  const handlers = buildHandlers(m.deps);
+  const p = await createProject(db, { name: "Flow", mode: "ugc" });
+  await updateBriefing(db, p.id, { copy: "Copy do produto milagroso" });
+  await addReference(m.deps, { projectId: p.id, label: "produto", bytes: Buffer.from("png"), mimeType: "image/png" });
+  await setStage(db, p.id, "script");
+  await planProjectScript(m.deps, p.id);
+  await generateAllScenes(m.deps, p.id);
+  await drain(handlers);
+  return { p, handlers };
+}
+
+describe("fluxo UGC ponta a ponta com providers falsos", () => {
+  it("briefing -> roteiro -> geração -> revisão -> aprovação -> montagem -> done", async () => {
+    const m = await makeDeps({ text: [script], video: { clip: await makeClipBytes(1), pendingPolls: 1 } });
+    cleanup = m.cleanup;
+    const { p, handlers } = await ugcUntilGenerated(m);
+
+    let snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("review");
+    expect(snap.scenes).toHaveLength(2);
+    expect(snap.scenes.every((s) => s.attempts.length === 1 && s.attempts[0]!.status === "done")).toBe(true);
+    expect(m.video.starts).toHaveLength(2); // uma geração paga por cena, mesmo com polls pendentes
+    expect(m.video.starts[0]!.references.map((r) => r.label)).toEqual(["produto"]);
+
+    for (const s of snap.scenes) await approveAttempt(db, s.id, s.attempts[0]!.id);
+    await startAssembly(db, p.id);
+    expect((await getSnapshot(db, p.id)).project.stage).toBe("assembling");
+    await drain(handlers);
+
+    snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("done");
+    expect(snap.finalAsset).not.toBeNull();
+    const bytes = await m.deps.storage.get(snap.finalAsset!.storageKey);
+    await withTempDir(async (dir) => {
+      const file = path.join(dir, "final.mp4");
+      await writeFile(file, bytes);
+      const out = await probe(file);
+      expect(out.height).toBeGreaterThan(out.width);
+      expect(out.hasAudio).toBe(true);
+      expect(out.durationSeconds).toBeGreaterThan(1.5);
+      expect(out.durationSeconds).toBeLessThan(2.6);
+    });
+    expect(await db.select().from(jobs).where(and(eq(jobs.status, "failed")))).toHaveLength(0);
+  });
+
+  it("uma cena bloqueada pelo provider não trava as outras: projeto chega em revisão", async () => {
+    const m = await makeDeps({ text: [script], video: { clip: await makeClipBytes(1) } });
+    cleanup = m.cleanup;
+    const ok = m.video.poll.bind(m.video);
+    m.video.poll = async (h) =>
+      h.providerRef === "fake-1" ? { state: "failed", reason: "Conteúdo bloqueado", retryable: false } : ok(h);
+    const { p } = await ugcUntilGenerated(m);
+
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("review");
+    const statuses = snap.scenes.map((s) => s.attempts[0]!.status).sort();
+    expect(statuses).toEqual(["blocked", "done"]);
+    const blocked = (await db.select().from(sceneAttempts)).find((a) => a.status === "blocked")!;
+    expect(blocked.error).toBe("Conteúdo bloqueado");
+    // A cena bloqueada não tem clipe aprovável.
+    const blockedScene = snap.scenes.find((s) => s.attempts[0]!.status === "blocked")!;
+    await expect(approveAttempt(db, blockedScene.id, blocked.id)).rejects.toThrow(/geração pronta/);
+    expect(await db.select().from(assets).where(eq(assets.kind, "clip"))).toHaveLength(1);
+  });
+});
+```
+
+Run: `pnpm vitest run tests/worker/flow.test.ts`
+Expected: 2 testes PASS (~3 s).
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/worker tests/worker
@@ -3400,7 +3618,7 @@ git commit -m "feat(worker): job runner, handler registry and entrypoint"
 > O `OmniVideoModel` abaixo segue o formato de chamada documentado em `https://aistudio.google.com/docs/omni`. Se o spike registrou um formato diferente de `input` ou `response_format`, usar o do spike (o teste unitário com cliente falso trava o formato escolhido).
 
 **Files:**
-- Create: `src/providers/errors.ts`, `gemini.ts`, `omni.ts`, `dev.ts`, `index.ts`
+- Create: `src/providers/errors.ts`, `gemini.ts`, `omni.ts`, `dev.ts`, `index.ts` (`dev.ts` e uma `index.ts` parcial só com `fake` já existem, ver Steps 7–8)
 - Test: `tests/providers/errors.test.ts`, `gemini.test.ts`, `omni.test.ts`, `dev.test.ts`, `tests/live/gemini.live.test.ts`
 
 - [ ] **Step 1: Escrever os testes de mapeamento de erro**
@@ -3782,14 +4000,19 @@ export class OmniVideoModel implements VideoModel {
 
 Run: `pnpm vitest run tests/providers/omni.test.ts` — Expected: 5 testes PASS.
 
-- [ ] **Step 7: Testes e implementação do provider de desenvolvimento**
+- [x] **Step 7: Testes e implementação do provider de desenvolvimento** — FEITO (não depende do spike; adiantado na revisão final do Plano 2, porque `PROVIDER=fake` precisa de um clipe MP4 de verdade para o worker concluir cenas e o Plano 3 importa `createProviders`)
 
-`tests/providers/dev.test.ts`:
+`tests/providers/dev.test.ts` (inclui o teste da fábrica parcial do Step 8):
 ```ts
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { scriptDraftSchema } from "@/domain/script";
-import { createDevProviders } from "@/providers/dev";
 import { z } from "zod";
+import { loadEnv } from "@/config/env";
+import { scriptDraftSchema } from "@/domain/script";
+import { probe, withTempDir } from "@/modules/ffmpeg";
+import { createProviders } from "@/providers";
+import { createDevProviders } from "@/providers/dev";
 
 describe("createDevProviders", () => {
   it("devolve roteiro válido para task=script e personagens para task=characters", async () => {
@@ -3803,14 +4026,45 @@ describe("createDevProviders", () => {
     expect(chars.characters.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("gera um clipe de verdade depois de alguns polls", async () => {
+  it("gera um clipe de verdade depois de alguns polls, que o probe aceita (vertical, com áudio)", async () => {
     const { video } = await createDevProviders();
     const h = await video.start({ prompt: "x", references: [], targetSeconds: 3 });
     expect((await video.poll(h)).state).toBe("pending");
     expect((await video.poll(h)).state).toBe("pending");
     const done = await video.poll(h);
     expect(done.state).toBe("done");
-    expect(done.state === "done" && done.bytes.length).toBeGreaterThan(1000);
+    if (done.state !== "done") return;
+    expect(done.bytes.length).toBeGreaterThan(1000);
+    await withTempDir(async (dir) => {
+      const file = path.join(dir, "c.mp4");
+      await writeFile(file, done.bytes);
+      const p = await probe(file);
+      expect(p.height).toBeGreaterThan(p.width);
+      expect(p.hasAudio).toBe(true);
+      expect(p.durationSeconds).toBeGreaterThan(2);
+    });
+  });
+});
+
+describe("createProviders", () => {
+  const env = (provider: string) =>
+    loadEnv({
+      DATABASE_URL: "postgres://x",
+      PROVIDER: provider,
+      GEMINI_API_KEY: "k",
+      GEMINI_TEXT_MODEL: "t",
+      GEMINI_IMAGE_MODEL: "i",
+      ACCESS_PASSWORD: "x",
+      SESSION_SECRET: "a".repeat(32),
+    });
+
+  it("PROVIDER=fake devolve os providers de desenvolvimento", async () => {
+    const providers = await createProviders(env("fake"));
+    expect(Object.keys(providers).sort()).toEqual(["image", "text", "video"]);
+  });
+
+  it("PROVIDER=gemini ainda não implementado: erro claro em português", async () => {
+    await expect(createProviders(env("gemini"))).rejects.toThrow(/Provider Gemini ainda não implementado/);
   });
 });
 ```
@@ -3858,7 +4112,22 @@ export async function createDevProviders(): Promise<Providers> {
 
 Run: `pnpm vitest run tests/providers/dev.test.ts` — Expected: PASS.
 
-- [ ] **Step 8: Fábrica `src/providers/index.ts`**
+- [ ] **Step 8: Fábrica `src/providers/index.ts` (completa; depende do spike)**
+
+> **Já existe uma versão parcial** (feita junto com o Step 7), que só atende `PROVIDER=fake` e lança "Provider Gemini ainda não implementado: depende do spike do provider de vídeo (Plano 1, Task 3 / Plano 2, Task 11)." para `gemini`:
+> ```ts
+> import type { Env } from "@/config/env";
+> import { createDevProviders } from "./dev";
+> import type { Providers } from "./types";
+>
+> export async function createProviders(env: Env): Promise<Providers> {
+>   if (env.PROVIDER === "fake") return createDevProviders();
+>   throw new Error(
+>     "Provider Gemini ainda não implementado: depende do spike do provider de vídeo (Plano 1, Task 3 / Plano 2, Task 11).",
+>   );
+> }
+> ```
+> Ao fazer os Steps 1–6, substitua-a pela versão abaixo e troque o teste "PROVIDER=gemini ainda não implementado" em `tests/providers/dev.test.ts` por um que verifique que `gemini` devolve os três modelos reais.
 
 ```ts
 import { GoogleGenAI } from "@google/genai";

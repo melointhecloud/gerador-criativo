@@ -93,6 +93,14 @@ describe("setStage", () => {
     await expect(setStage(db, p.id, "review")).rejects.toThrow(/Não é possível/);
   });
 
+  it("não deixa sair de generating (evita um segundo conjunto de tentativas pagas)", async () => {
+    const p = await seedProject(db, { stage: "generating" });
+    for (const target of ["script", "review"] as const) {
+      await expect(setStage(db, p.id, target)).rejects.toThrow(/Aguarde a geração das cenas terminar/);
+    }
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("generating");
+  });
+
   it("permite voltar de review para script", async () => {
     const p = await seedProject(db, { stage: "review" });
     expect((await setStage(db, p.id, "script")).stage).toBe("script");

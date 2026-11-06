@@ -10,7 +10,7 @@ import { advanceToReviewIfIdle } from "@/services/projects";
 import { probe, withTempDir } from "./ffmpeg";
 
 const POLL_DELAY_MS = 10_000;
-// Teto de espera por uma geração que continua "pending": passou disso, a tentativa falha e a cena pode ser regerada.
+// Teto de espera por uma geração que continua "pending" (contado desde que o providerRef foi salvo): passou disso, a tentativa falha e a cena pode ser regerada.
 export const MAX_GENERATION_WAIT_MS = 30 * 60_000;
 const TERMINAL: AttemptStatus[] = ["done", "failed", "blocked"];
 
@@ -66,6 +66,7 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
 
   try {
     let providerRef = attempt.providerRef;
+    let justStarted = false;
     if (!providerRef) {
       const references = await loadReferences(deps, attempt.referenceAssetIds);
       const started = await providers.video.start({
@@ -74,13 +75,18 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
         targetSeconds: scene.targetSeconds,
       });
       providerRef = started.providerRef;
+      justStarted = true;
       // Persistir imediatamente, antes de qualquer espera: se o worker reiniciar, o polling continua daqui.
       await patchAttempt(db, attempt.id, { providerRef, status: "generating" });
     }
 
     const result = await providers.video.poll({ providerRef });
     if (result.state === "pending") {
-      if (Date.now() - attempt.createdAt.getTime() > MAX_GENERATION_WAIT_MS) {
+      // O relógio do teto é o do último `providerRef` salvo (patchAttempt atualiza updatedAt; nada mais escreve em
+      // scene_attempts enquanto a geração está pendente). Medir de createdAt descartaria uma geração recém-paga
+      // de uma tentativa que ficou muito tempo na fila ou foi reiniciada. Na execução que acabou de chamar start()
+      // o teto não se aplica.
+      if (!justStarted && Date.now() - attempt.updatedAt.getTime() > MAX_GENERATION_WAIT_MS) {
         await finish(deps, scene.projectId, attempt.id, {
           status: "failed",
           error: "A geração demorou mais de 30 minutos e foi interrompida (tempo esgotado). Regere a cena.",

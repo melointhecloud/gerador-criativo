@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { assets, characters } from "@/db/schema";
+import { assets, characters, projects, sceneReferences } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { PermanentError } from "@/queue/errors";
 import { ProviderError, type TextModel } from "@/providers/types";
@@ -76,6 +76,10 @@ export async function handleGenerateCharacter(deps: Deps, payload: { characterId
   const key = `projects/${character.projectId}/characters/${character.id}-${Date.now()}.${EXT[image.mimeType] ?? "png"}`;
   await storage.put(key, image.bytes, image.mimeType);
   await db.transaction(async (tx) => {
+    // Ordem de locks igual à dos serviços (projeto primeiro, depois personagem): inserir o asset toma um lock
+    // compartilhado na linha do projeto (FK), e travar o personagem antes disso fecharia um ciclo com
+    // updateCharacter/regenerateCharacterImage (deadlock 40P01).
+    await tx.select({ id: projects.id }).from(projects).where(eq(projects.id, character.projectId)).for("update");
     const [current] = await tx.select().from(characters).where(eq(characters.id, character.id)).for("update");
     if (!current || current.imageStatus !== "pending" || current.description !== character.description) return;
     const [asset] = await tx
@@ -92,7 +96,12 @@ export async function handleGenerateCharacter(deps: Deps, payload: { characterId
       .update(characters)
       .set({ assetId: asset!.id, imageStatus: "ready", imageError: null })
       .where(eq(characters.id, current.id));
-    if (current.assetId) await tx.delete(assets).where(eq(assets.id, current.assetId));
+    if (current.assetId) {
+      // scene_references.asset_id tem ON DELETE CASCADE: sem repontar, apagar a imagem antiga desvincularia o
+      // personagem das cenas já planejadas (e a próxima geração paga perderia a referência de identidade).
+      await tx.update(sceneReferences).set({ assetId: asset!.id }).where(eq(sceneReferences.assetId, current.assetId));
+      await tx.delete(assets).where(eq(assets.id, current.assetId));
+    }
   });
 }
 

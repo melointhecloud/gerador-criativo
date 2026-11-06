@@ -114,6 +114,9 @@ async function assertCanEnter(db: DbOrTx, project: Project, target: Stage): Prom
 // Dentro de uma transação, o UPDATE também segura o lock da linha do projeto até o commit.
 export async function setStage(db: DbOrTx, projectId: string, target: Stage): Promise<Project> {
   const project = await getProject(db, projectId);
+  // Só o worker tira o projeto de `generating` (advanceToReviewIfIdle). Sair daqui permitiria um novo
+  // generateAllScenes e, com ele, um segundo conjunto de tentativas pagas.
+  if (project.stage === "generating") throw new DomainError("Aguarde a geração das cenas terminar antes de mudar de etapa.");
   if (!canTransition(project.mode, project.stage, target)) {
     throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
   }

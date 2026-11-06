@@ -2,9 +2,11 @@ import type { Deps } from "@/deps";
 import { onAssembleDead, handleAssemble } from "@/modules/assembler";
 import { handleGenerateCharacter, onGenerateCharacterDead } from "@/modules/character-designer";
 import { handleGenerateScene, onGenerateSceneDead } from "@/modules/scene-generator";
-import type { Handlers } from "./runner";
+import type { JobType } from "@/queue/queue";
+import type { Handler } from "./runner";
 
-export function buildHandlers(deps: Deps): Handlers {
+// Record<JobType, ...>: adicionar um tipo de job sem handler não compila.
+export function buildHandlers(deps: Deps): Record<JobType, Handler> {
   return {
     generate_scene: {
       run: (p) => handleGenerateScene(deps, p as { attemptId: string }),

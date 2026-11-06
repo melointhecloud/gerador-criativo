@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { assets, characters, jobs } from "@/db/schema";
+import { assets, characters, jobs, sceneReferences } from "@/db/schema";
+import { DomainError } from "@/services/errors";
 import { handleGenerateCharacter, onGenerateCharacterDead } from "@/modules/character-designer";
 import {
   addCharacter, approveCharacter, proposeProjectCharacters, regenerateCharacterImage, removeCharacter, updateCharacter,
@@ -8,7 +9,7 @@ import {
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { ProviderError } from "@/providers/types";
-import { seedAsset, seedCharacter, seedProject } from "../helpers/seed";
+import { seedAsset, seedCharacter, seedProject, seedScene } from "../helpers/seed";
 
 beforeEach(resetDb);
 let cleanup: () => Promise<void>;
@@ -174,6 +175,48 @@ describe("handleGenerateCharacter", () => {
     await handleGenerateCharacter(m.deps, { characterId: c.id });
     expect(await db.select().from(assets).where(eq(assets.id, old.id))).toHaveLength(0);
     expect((await charOf(c.id)).assetId).not.toBe(old.id);
+  });
+
+  it("regerar mantém o vínculo das cenas já planejadas, agora com a imagem nova", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const old = await seedAsset(db, p.id, { kind: "character", label: "Maria" });
+    const c = await seedCharacter(db, p.id, { name: "Maria", imageStatus: "pending", assetId: old.id });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [old.id] });
+    const s2 = await seedScene(db, p.id, 1, { assetIds: [old.id] });
+    await handleGenerateCharacter(m.deps, { characterId: c.id });
+    const fresh = (await charOf(c.id)).assetId!;
+    expect(fresh).not.toBe(old.id);
+    expect(await db.select().from(assets).where(eq(assets.id, old.id))).toHaveLength(0);
+    const links = await db.select().from(sceneReferences);
+    expect(links.map((l) => [l.sceneId, l.assetId]).sort()).toEqual([[s1.id, fresh], [s2.id, fresh]].sort());
+  });
+
+  it("handler e serviço concorrentes no mesmo personagem não dão deadlock (ordem de locks: projeto, depois personagem)", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    for (let round = 0; round < 15; round++) {
+      const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+      const c = await seedCharacter(db, p.id, { name: `Maria${round}`, imageStatus: "pending" });
+      const results = await Promise.allSettled([
+        handleGenerateCharacter(m.deps, { characterId: c.id }),
+        updateCharacter(m.deps, c.id, { name: `Mariana${round}` }),
+        approveCharacter(db, c.id),
+      ]);
+      for (const r of results) {
+        if (r.status === "rejected") {
+          // approveCharacter pode legitimamente perder a corrida ("espere a imagem"); deadlock nunca.
+          const e = r.reason as { code?: string; cause?: { code?: string } };
+          expect(e.cause?.code ?? e.code).not.toBe("40P01");
+          expect(r.reason).toBeInstanceOf(DomainError);
+        }
+      }
+      const after = await charOf(c.id);
+      expect(after.imageStatus).toBe("ready");
+      const [asset] = await db.select().from(assets).where(eq(assets.id, after.assetId!));
+      expect(asset!.label).toBe(after.name); // rótulo da imagem acompanha o nome em qualquer ordem
+    }
   });
 
   it("é idempotente: reentrega depois de pronto não gera nem duplica assets", async () => {

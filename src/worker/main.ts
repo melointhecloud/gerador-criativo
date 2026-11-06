@@ -1,25 +1,10 @@
-import type { Env } from "@/config/env";
 import { loadEnv } from "@/config/env";
 import { createDb } from "@/db/client";
 import type { Deps } from "@/deps";
-import { FakeImageModel, FakeTextModel, FakeVideoModel } from "@/providers/fake";
-import { type Providers } from "@/providers/types";
+import { createProviders } from "@/providers";
 import { createStorage } from "@/storage";
 import { buildHandlers } from "./handlers";
 import { recoverStaleJobs, runOnce } from "./runner";
-
-// TODO(Task 11): remover este seam e importar `createProviders` de "@/providers" (fábrica real).
-// Até lá só `PROVIDER=fake` funciona, e o clipe falso não é um MP4 válido (a montagem real falharia).
-async function createProviders(env: Env): Promise<Providers> {
-  if (env.PROVIDER !== "fake") {
-    throw new Error("PROVIDER=gemini ainda não está disponível: a fábrica de providers reais é a Task 11.");
-  }
-  return {
-    text: new FakeTextModel([]),
-    image: new FakeImageModel(),
-    video: new FakeVideoModel({ clip: Buffer.from("fake-clip") }),
-  };
-}
 
 // Job `running` há mais que isso é considerado órfão. Deve superar com folga o timeout do ffmpeg
 // (FFMPEG_TIMEOUT_MS = 10 min) somado às transferências de/para o storage, senão uma montagem

@@ -87,6 +87,24 @@ describe("planProjectScript", () => {
     const p = await seedProject(db, { stage: "review" });
     await expect(planProjectScript(m.deps, p.id)).rejects.toThrow(/etapa de roteiro/);
   });
+
+  it("se a geração começa durante a chamada ao modelo, o replanejamento é rejeitado e as cenas geradas sobrevivem", async () => {
+    const { m, p } = await projectWithScript();
+    const inner = m.deps.providers.text;
+    // Simula o intercalamento: enquanto o LLM "pensa", outra requisição aprova o roteiro e gera as cenas.
+    m.deps.providers.text = {
+      async generateJson(args) {
+        await generateAllScenes(m.deps, p.id);
+        return inner.generateJson(args);
+      },
+    };
+    (m.text as unknown as { responses: unknown[] }).responses.push(draft());
+    await expect(planProjectScript(m.deps, p.id)).rejects.toThrow(/etapa de roteiro/);
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("generating");
+    expect(snap.scenes).toHaveLength(2);
+    expect(await db.select().from(sceneAttempts)).toHaveLength(2);
+  });
 });
 
 describe("updateScene", () => {

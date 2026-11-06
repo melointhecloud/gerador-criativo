@@ -97,8 +97,12 @@ describe("handleGenerateScene", () => {
 });
 
 describe("teto de espera por geração pendente", () => {
+  // Simula uma geração já iniciada (providerRef salvo) há `ms`: o teto conta a partir de updatedAt.
   const ageAttempt = (id: string, ms: number) =>
-    db.update(sceneAttempts).set({ createdAt: new Date(Date.now() - ms) }).where(eq(sceneAttempts.id, id));
+    db
+      .update(sceneAttempts)
+      .set({ providerRef: "fake-1", status: "generating", updatedAt: new Date(Date.now() - ms) })
+      .where(eq(sceneAttempts.id, id));
 
   it("passou do teto: falha com mensagem de tempo esgotado, sem retry, e avança o projeto", async () => {
     const { m, p, attempt } = await setup({ video: { pendingPolls: 1000 } });
@@ -113,6 +117,31 @@ describe("teto de espera por geração pendente", () => {
   it("dentro do teto: continua pedindo para voltar", async () => {
     const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
     await ageAttempt(attempt.id, MAX_GENERATION_WAIT_MS - 5 * 60_000);
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+    expect((await attemptOf(attempt.id)).status).toBe("generating");
+  });
+});
+
+describe("teto de espera: relógio do providerRef", () => {
+  const old = (id: string, patch: Partial<typeof sceneAttempts.$inferInsert>) =>
+    db.update(sceneAttempts).set(patch).where(eq(sceneAttempts.id, id));
+
+  it("tentativa criada há 2h mas iniciada agora: não falha, pede para voltar", async () => {
+    const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    const longAgo = new Date(Date.now() - 2 * 3600_000);
+    await old(attempt.id, { createdAt: longAgo, updatedAt: longAgo }); // ficou na fila; providerRef ainda nulo
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+    expect(m.video.starts).toHaveLength(1);
+    const a = await attemptOf(attempt.id);
+    expect(a.status).toBe("generating");
+    expect(a.providerRef).toBe("fake-1");
+    // Próxima execução (providerRef recém-salvo): continua dentro do teto.
+    await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
+  });
+
+  it("createdAt antigo com providerRef recente: não falha", async () => {
+    const { m, attempt } = await setup({ video: { pendingPolls: 1000 } });
+    await old(attempt.id, { createdAt: new Date(Date.now() - 2 * 3600_000), providerRef: "fake-1", status: "generating" });
     await expect(handleGenerateScene(m.deps, { attemptId: attempt.id })).rejects.toBeInstanceOf(RetryLater);
     expect((await attemptOf(attempt.id)).status).toBe("generating");
   });
