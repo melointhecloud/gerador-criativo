@@ -42,7 +42,7 @@
 `tests/auth/session.test.ts`:
 ```ts
 import { describe, expect, it } from "vitest";
-import { createSession, passwordMatches, verifySession } from "@/auth/session";
+import { createSession, passwordMatches, SESSION_MAX_AGE_S, verifySession } from "@/auth/session";
 
 const secret = "s".repeat(40);
 
@@ -68,11 +68,37 @@ describe("sessão", () => {
   });
 });
 
+describe("sessão: tokens malformados e segredo", () => {
+  it("rejeita sem lançar: partes demais, base64 inválido, expiração não numérica", async () => {
+    const t = await createSession(secret);
+    const [exp, sig] = t.split(".");
+    expect(await verifySession(`${exp}.${sig}.extra`, secret)).toBe(false);
+    expect(await verifySession(`${exp}.!!!`, secret)).toBe(false);
+    expect(await verifySession(`${exp}.`, secret)).toBe(false);
+    expect(await verifySession(`abc.${sig}`, secret)).toBe(false);
+    expect(await verifySession(`-5.${sig}`, secret)).toBe(false);
+    expect(await verifySession(".", secret)).toBe(false);
+  });
+  it("não aceita segredo vazio", async () => {
+    await expect(createSession("")).rejects.toThrow();
+    const t = await createSession(secret);
+    expect(await verifySession(t, "")).toBe(false);
+  });
+  it("expira exatamente no limite", async () => {
+    const now = 1_700_000_000_000;
+    const t = await createSession(secret, now);
+    const exp = now + SESSION_MAX_AGE_S * 1000;
+    expect(await verifySession(t, secret, exp - 1)).toBe(true);
+    expect(await verifySession(t, secret, exp)).toBe(false);
+  });
+});
+
 describe("passwordMatches", () => {
   it("compara a senha", async () => {
     expect(await passwordMatches("segredo", "segredo")).toBe(true);
     expect(await passwordMatches("errada", "segredo")).toBe(false);
     expect(await passwordMatches("", "segredo")).toBe(false);
+    expect(await passwordMatches("segredo-mais-longo", "segredo")).toBe(false);
   });
 });
 ```
@@ -97,40 +123,70 @@ function toBase64Url(buf: ArrayBuffer): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function hmac(secret: string, data: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return toBase64Url(await crypto.subtle.sign("HMAC", key, enc.encode(data)));
+// Devolve null se não for base64url válido (nunca lança).
+function fromBase64Url(s: string): Uint8Array<ArrayBuffer> | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
+  try {
+    const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
 }
 
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
+function hmacKey(secret: string, usages: KeyUsage[]): Promise<CryptoKey> {
+  if (!secret) throw new Error("Segredo de sessão vazio.");
+  return crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, usages);
+}
+
+async function hmac(secret: string, data: string): Promise<ArrayBuffer> {
+  return crypto.subtle.sign("HMAC", await hmacKey(secret, ["sign"]), enc.encode(data));
+}
+
+// Comparação em tempo constante de dois digests de tamanho fixo (32 bytes).
+function digestsEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
+  const x = new Uint8Array(a);
+  const y = new Uint8Array(b);
+  if (x.length !== y.length) return false;
   let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < x.length; i++) diff |= x[i]! ^ y[i]!;
   return diff === 0;
 }
 
 export async function createSession(secret: string, now = Date.now()): Promise<string> {
   const payload = String(now + SESSION_MAX_AGE_S * 1000);
-  return `${payload}.${await hmac(secret, payload)}`;
+  return `${payload}.${toBase64Url(await hmac(secret, payload))}`;
 }
 
 export async function verifySession(token: string | undefined, secret: string, now = Date.now()): Promise<boolean> {
-  if (!token) return false;
-  const [payload, sig] = token.split(".");
-  if (!payload || !sig) return false;
-  if (!safeEqual(sig, await hmac(secret, payload))) return false;
-  return Number(payload) > now;
+  try {
+    if (!token || !secret) return false;
+    const parts = token.split(".");
+    if (parts.length !== 2) return false;
+    const [payload, sig] = parts as [string, string];
+    if (!/^\d{1,16}$/.test(payload)) return false;
+    const sigBytes = fromBase64Url(sig);
+    if (!sigBytes) return false;
+    // crypto.subtle.verify compara a assinatura em tempo constante.
+    const ok = await crypto.subtle.verify("HMAC", await hmacKey(secret, ["verify"]), sigBytes, enc.encode(payload));
+    return ok && Number(payload) > now;
+  } catch {
+    return false;
+  }
 }
 
+// Compara digests HMAC (tamanho fixo) das duas senhas: tempo constante e sem vazar o tamanho.
 export async function passwordMatches(input: string, expected: string): Promise<boolean> {
-  return safeEqual(await hmac("password-check", input), await hmac("password-check", expected));
+  return digestsEqual(await hmac("password-check", input), await hmac("password-check", expected));
 }
 ```
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/auth/session.test.ts`
-Expected: 5 testes PASS.
+Expected: 8 testes PASS.
 
 - [ ] **Step 5: Commit**
 
