@@ -10,7 +10,7 @@ function isBusy(s: ProjectView): boolean {
     s.project.stage === "generating" ||
     s.project.stage === "assembling" ||
     s.characters.some((c) => c.imageStatus === "pending") ||
-    s.scenes.some((sc) => sc.attempts.some((a) => a.status === "queued" || a.status === "generating"))
+    s.hasPendingGenerations
   );
 }
 

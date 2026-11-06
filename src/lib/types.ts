@@ -4,6 +4,7 @@ import type { Snapshot } from "@/services/projects";
 export type ProjectView = Snapshot & {
   estimatedSeconds: number; // segundos que a próxima geração vai custar (só cenas sem aprovação)
   scenesToGenerate: number;
+  hasPendingGenerations: boolean; // alguma cena com tentativa na fila ou gerando (regra do servidor)
 };
 export type PanelProps = {
   snap: ProjectView;

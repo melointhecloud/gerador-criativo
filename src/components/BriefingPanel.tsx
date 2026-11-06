@@ -58,7 +58,10 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
                   <button
                     className="secondary"
                     disabled={working}
-                    onClick={() => void run(() => api(`/api/assets/${r.id}`, { method: "DELETE" }))}
+                    onClick={() => {
+                      if (!window.confirm(`Remover a referência “${r.label ?? "sem rótulo"}”? As cenas que a usam vão avisar que perderam a referência.`)) return;
+                      void run(() => api(`/api/assets/${r.id}`, { method: "DELETE" }));
+                    }}
                   >
                     Remover
                   </button>

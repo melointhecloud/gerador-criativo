@@ -560,22 +560,17 @@ import type { Env } from "@/config/env";
 import type { Deps } from "@/deps";
 import { DomainError } from "@/services/errors";
 import { getContext } from "./context";
+import { readCookie } from "./cookie";
+
+export { readCookie };
 
 // Cabeçalhos de toda resposta com arquivo do usuário (rotas de arquivo da Task 3): nunca cache público, sem sniffing.
 export const FILE_HEADERS = {
   "Cache-Control": "private, max-age=3600",
+  Vary: "Cookie", // o cache não vale depois que o cookie muda (logout)
   "X-Content-Type-Options": "nosniff",
 } as const;
 export const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
-
-export function readCookie(header: string | null, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(";")) {
-    const [k, ...v] = part.trim().split("=");
-    if (k === name) return v.join("=");
-  }
-  return undefined;
-}
 
 // Falha fechado: qualquer erro (cookie ausente, segredo vazio, contexto indisponível) conta como não autenticado.
 export async function isAuthedCookie(cookieHeader: string | null): Promise<boolean> {
@@ -690,6 +685,151 @@ export function api(handler: (a: ApiArgs) => Promise<unknown>, opts: { auth?: bo
 
 > Notas de execução (corrigidas após revisão): `api()` falha fechado (qualquer erro na verificação da sessão = 401; erro ao montar o contexto = 500 sem rodar o handler e sem mapear o ZodError do `loadEnv` para 400); `auth:false` é só para a rota de login; `getContext()` limpa o cache quando a criação rejeita (ex.: ffmpeg ausente com `PROVIDER=fake`); erros Zod viram resumo em pt-BR ("obrigatório" só quando a mensagem nativa diz `received undefined`; o Zod v4 não põe `input` na issue); métodos que não são GET/HEAD/OPTIONS passam por `isCrossOrigin` (Sec-Fetch-Site, senão Origin x Host/X-Forwarded-Host) depois da sessão, inclusive em `auth:false`; `FILE_HEADERS` (`Cache-Control: private`, `nosniff`) deve ser usado nas respostas de arquivo da Task 3. A assinatura `api(async ({ req, params, deps, env }) => ...)` não mudou, então os snippets da Task 3 continuam válidos; `params` é `Promise` no Next 16, já tratado.
 
+**Portão central das páginas (proxy do Next 16).** `readCookie` foi movido para `src/web/cookie.ts` (sem dependências, seguro para o proxy) e é reexportado por `src/web/http.ts`. As páginas continuam checando a sessão (defesa em profundidade), mas agora há UM portão: `src/proxy.ts` (nome do Next 16 para o middleware; exporta `proxy` e `config.matcher`), que redireciona para `/login` toda requisição de página sem sessão válida. Ficam de fora `/login`, `/api/**` (continuam respondendo 401 em JSON via `api()`), `/_next/**` e qualquer caminho com ponto (favicon, estáticos). A decisão vive em funções puras testadas.
+
+`src/web/cookie.ts`:
+```ts
+// Leitura de cookie sem dependências (seguro para o proxy: não importa banco nem storage).
+export function readCookie(header: string | null, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === name) return v.join("=");
+  }
+  return undefined;
+}
+```
+
+`src/web/page-gate.ts`:
+```ts
+import { SESSION_COOKIE, verifySession } from "@/auth/session";
+import { readCookie } from "@/web/cookie";
+
+// Portão central das páginas (usado por src/proxy.ts). Rotas de API ficam de fora: `api()` já responde 401 em JSON.
+// Mantenha em sincronia com `config.matcher` de src/proxy.ts (há teste cobrindo os dois).
+export function isGatedPath(pathname: string): boolean {
+  if (/^\/(login|api|_next)(\/|$)/.test(pathname)) return false;
+  if (pathname.includes(".")) return false; // favicon e demais arquivos estáticos
+  return true;
+}
+
+export type GateDecision = { action: "allow" } | { action: "redirect"; to: "/login" };
+
+// Falha fechado: qualquer erro, cookie ausente ou segredo vazio vira redirecionamento para /login.
+export async function decideGate(a: { pathname: string; cookie: string | null; secret: string | undefined }): Promise<GateDecision> {
+  if (!isGatedPath(a.pathname)) return { action: "allow" };
+  try {
+    if (await verifySession(readCookie(a.cookie, SESSION_COOKIE), a.secret ?? "")) return { action: "allow" };
+  } catch {
+    // cai no redirecionamento
+  }
+  return { action: "redirect", to: "/login" };
+}
+```
+
+`src/proxy.ts`:
+```ts
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { decideGate } from "@/web/page-gate";
+
+// Portão central das páginas: sem sessão válida, tudo vai para /login. Fica de fora (ver `isGatedPath`):
+// /login, /api/** (responde 401 em JSON via `api()`), /_next/**, e qualquer caminho com ponto (favicon, estáticos).
+export async function proxy(request: NextRequest) {
+  const d = await decideGate({
+    pathname: request.nextUrl.pathname,
+    cookie: request.headers.get("cookie"),
+    secret: process.env.SESSION_SECRET,
+  });
+  if (d.action === "redirect") return NextResponse.redirect(new URL(d.to, request.url));
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/((?!login(?:/|$)|api(?:/|$)|_next(?:/|$)|.*\\..*).*)"],
+};
+```
+
+`tests/web/page-gate.test.ts`:
+```ts
+import { readdirSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+import { describe, expect, it } from "vitest";
+import { createSession, SESSION_COOKIE } from "@/auth/session";
+import { config } from "@/proxy";
+import { decideGate, isGatedPath } from "@/web/page-gate";
+
+const SECRET = "s".repeat(40);
+const EXCLUDED = ["/login", "/login/", "/api/projects", "/api", "/_next/static/x.js", "/_next/image", "/favicon.ico", "/logo.png"];
+const GATED = ["/", "/projects/x", "/some/new/page", "/loginx", "/apixyz"];
+
+describe("isGatedPath", () => {
+  it("protege páginas e deixa de fora login, API, assets do Next e estáticos", () => {
+    for (const p of GATED) expect(isGatedPath(p), p).toBe(true);
+    for (const p of EXCLUDED) expect(isGatedPath(p), p).toBe(false);
+  });
+});
+
+describe("decideGate", () => {
+  const redirect = { action: "redirect", to: "/login" };
+  it("cookie válido: libera", async () => {
+    const token = await createSession(SECRET);
+    expect(await decideGate({ pathname: "/", cookie: `${SESSION_COOKIE}=${token}`, secret: SECRET })).toEqual({ action: "allow" });
+    expect(await decideGate({ pathname: "/projects/x", cookie: `a=b; ${SESSION_COOKIE}=${token}`, secret: SECRET })).toEqual({ action: "allow" });
+  });
+  it("cookie ausente, inválido ou expirado: redireciona para /login", async () => {
+    expect(await decideGate({ pathname: "/", cookie: null, secret: SECRET })).toEqual(redirect);
+    expect(await decideGate({ pathname: "/", cookie: `${SESSION_COOKIE}=lixo`, secret: SECRET })).toEqual(redirect);
+    const expired = await createSession(SECRET, Date.now() - 15 * 24 * 3600 * 1000);
+    expect(await decideGate({ pathname: "/projects/x", cookie: `${SESSION_COOKIE}=${expired}`, secret: SECRET })).toEqual(redirect);
+    const other = await createSession("outro".repeat(10));
+    expect(await decideGate({ pathname: "/", cookie: `${SESSION_COOKIE}=${other}`, secret: SECRET })).toEqual(redirect);
+  });
+  it("segredo vazio ou indefinido: redireciona (falha fechado), mesmo com cookie bem formado", async () => {
+    const token = await createSession(SECRET);
+    expect(await decideGate({ pathname: "/", cookie: `${SESSION_COOKIE}=${token}`, secret: "" })).toEqual(redirect);
+    expect(await decideGate({ pathname: "/", cookie: `${SESSION_COOKIE}=${token}`, secret: undefined })).toEqual(redirect);
+  });
+  it("caminhos fora do portão passam sem cookie", async () => {
+    for (const p of EXCLUDED) expect(await decideGate({ pathname: p, cookie: null, secret: SECRET }), p).toEqual({ action: "allow" });
+  });
+});
+
+describe("matcher do proxy", () => {
+  it("cobre exatamente os mesmos caminhos que isGatedPath", () => {
+    expect(config.matcher).toHaveLength(1);
+    const re = new RegExp(`^${config.matcher[0]}$`);
+    for (const p of [...GATED, ...EXCLUDED]) expect(re.test(p), p).toBe(isGatedPath(p));
+  });
+});
+
+function pagesUnder(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) out.push(...pagesUnder(full));
+    else if (/^page\.(t|j)sx?$/.test(e.name)) out.push(full);
+  }
+  return out;
+}
+
+describe("páginas existentes", () => {
+  it("toda página, exceto /login, fica sob o portão central", () => {
+    const root = join(process.cwd(), "src", "app");
+    const pages = pagesUnder(root);
+    expect(pages.length).toBeGreaterThan(2);
+    for (const file of pages) {
+      const segs = relative(root, file).split(sep).slice(0, -1).filter((s) => !/^\(.*\)$/.test(s));
+      const route = "/" + segs.map((s) => s.replace(/^\[\.*(.*?)\]$/, "x")).join("/");
+      if (segs[0] === "login") expect(isGatedPath(route), route).toBe(false);
+      else expect(isGatedPath(route), route).toBe(true);
+    }
+  });
+});
+```
+
+Verificação: `pnpm build` lista `ƒ Proxy (Middleware)`. O teste de páginas falha se surgir uma `page.tsx` fora do portão (tudo exceto `login`). Atenção: um caminho com ponto (`/projects/x.y`) não passa pelo proxy; a checagem da própria página cobre isso.
+
 - [ ] **Step 6: Acrescentar `getAsset` em `src/services/projects.ts`**
 
 Adicionar depois de `getProject`:
@@ -709,7 +849,7 @@ Expected: todos PASS (range, http, context); typecheck limpo.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/web src/services/projects.ts tests/web
+git add src/web src/proxy.ts src/services/projects.ts tests/web
 git commit -m "feat(web): request context, api wrapper and range parser"
 ```
 
@@ -910,6 +1050,16 @@ describe("projetos", () => {
     expect(snap.estimatedSeconds).toBe(0);
     expect(snap.scenesToGenerate).toBe(0);
     expect(snap.scenes).toEqual([]);
+    expect(snap.hasPendingGenerations).toBe(false);
+  });
+
+  it("hasPendingGenerations vem do servidor: true com tentativa na fila, false sem", async () => {
+    const p = await seedProject(testDb, { stage: "review" });
+    const scene = await seedScene(testDb, p.id, 0);
+    const get = async () => (await call(projectRoute.GET, { url: `/api/projects/${p.id}`, params: { id: p.id } })).json();
+    expect((await get()).hasPendingGenerations).toBe(false);
+    await seedAttempt(testDb, scene.id, { status: "queued" });
+    expect((await get()).hasPendingGenerations).toBe(true);
   });
 
   it("rejeita modo inválido (400) e id que não é uuid (400)", async () => {
@@ -930,7 +1080,7 @@ describe("projetos", () => {
       body: { stage: "review" },
     });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("Não é possível");
+    expect((await res.json()).error).toContain("Não é possível ir de \"Briefing\" para \"Revisão\"");
   });
 
   it("a rota de etapa não aceita generating nem assembling (só as ações próprias entram nelas)", async () => {
@@ -973,6 +1123,7 @@ describe("arquivos", () => {
     expect(bad.headers.get("content-range")).toBe("bytes */10");
     const ok = await call(assetRoute.GET, { params: { assetId: asset.id } });
     expect(ok.headers.get("cache-control")).toContain("private");
+    expect(ok.headers.get("vary")).toBe("Cookie");
     expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
 
     const noRow = await call(assetRoute.GET, { params: { assetId: "00000000-0000-0000-0000-000000000000" } });
@@ -1311,7 +1462,8 @@ import { api } from "@/web/http";
 
 export const GET = api(async ({ params, deps }) => {
   const snap = await getSnapshot(deps.db, params.id);
-  return { ...snap, ...generationPlan(snap.scenes, sceneIdsWithPendingAttempt(snap.scenes)) };
+  const pending = sceneIdsWithPendingAttempt(snap.scenes);
+  return { ...snap, ...generationPlan(snap.scenes, pending), hasPendingGenerations: pending.size > 0 };
 });
 
 export const PATCH = api(async ({ req, params, deps }) => {
@@ -1548,7 +1700,23 @@ git commit -m "feat(api): authenticated endpoints for the whole creative flow"
 import type { NextConfig } from "next";
 
 // agentRules desligado: o `next dev` não cria/atualiza AGENTS.md no repositório.
-const config: NextConfig = { agentRules: false };
+const config: NextConfig = {
+  agentRules: false,
+  // Cabeçalhos de segurança em todas as rotas. Só frame-ancestors na CSP, de propósito (uma CSP completa pode quebrar o Next/React).
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Referrer-Policy", value: "same-origin" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+        ],
+      },
+    ];
+  },
+};
 export default config;
 ```
 
@@ -1611,6 +1779,7 @@ import type { Snapshot } from "@/services/projects";
 export type ProjectView = Snapshot & {
   estimatedSeconds: number; // segundos que a próxima geração vai custar (só cenas sem aprovação)
   scenesToGenerate: number;
+  hasPendingGenerations: boolean; // alguma cena com tentativa na fila ou gerando (regra do servidor)
 };
 export type PanelProps = {
   snap: ProjectView;
@@ -1676,7 +1845,7 @@ function isBusy(s: ProjectView): boolean {
     s.project.stage === "generating" ||
     s.project.stage === "assembling" ||
     s.characters.some((c) => c.imageStatus === "pending") ||
-    s.scenes.some((sc) => sc.attempts.some((a) => a.status === "queued" || a.status === "generating"))
+    s.hasPendingGenerations
   );
 }
 
@@ -1918,7 +2087,7 @@ export function ProjectView({ id }: { id: string }) {
   const currentIndex = stages.indexOf(project.stage);
   // A API só aceita voltar para etapas navegáveis, e só o worker tira o projeto de `generating`.
   // Em revisão, também não dá para voltar enquanto uma regeração está na fila ou rodando.
-  const hasPending = snap.scenes.some((sc) => sc.attempts.some((a) => a.status === "queued" || a.status === "generating"));
+  const hasPending = snap.hasPendingGenerations;
   const canGoBack = project.stage !== "generating" && project.stage !== "assembling" && !(project.stage === "review" && hasPending);
   const goTo = (stage: Stage) => run(() => api(`/api/projects/${id}/stage`, { body: { stage } }));
 
@@ -2032,7 +2201,10 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
                   <button
                     className="secondary"
                     disabled={working}
-                    onClick={() => void run(() => api(`/api/assets/${r.id}`, { method: "DELETE" }))}
+                    onClick={() => {
+                      if (!window.confirm(`Remover a referência “${r.label ?? "sem rótulo"}”? As cenas que a usam vão avisar que perderam a referência.`)) return;
+                      void run(() => api(`/api/assets/${r.id}`, { method: "DELETE" }));
+                    }}
                   >
                     Remover
                   </button>
@@ -2619,6 +2791,27 @@ export default function ErrorPage({ reset }: { error: Error & { digest?: string 
       </p>
       <button onClick={() => reset()}>Tentar de novo</button>
     </main>
+  );
+}
+```
+
+`src/app/global-error.tsx` (erro no layout raiz; traz o próprio `<html>`/`<body>` e não mostra `error.message` nem digest):
+```tsx
+"use client";
+
+// Último recurso: o erro aconteceu no layout raiz, então esta página traz o próprio <html> e <body>.
+// Não mostra error.message nem digest (podem vazar detalhes do servidor).
+export default function GlobalError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  return (
+    <html lang="pt-BR">
+      <body style={{ fontFamily: "system-ui, sans-serif", padding: 24, maxWidth: 480 }}>
+        <main>
+          <h1>Algo deu errado</h1>
+          <p role="alert">Não foi possível carregar a aplicação. Tente de novo; se o problema continuar, avise o time.</p>
+          <button onClick={() => reset()}>Tentar de novo</button>
+        </main>
+      </body>
+    </html>
   );
 }
 ```

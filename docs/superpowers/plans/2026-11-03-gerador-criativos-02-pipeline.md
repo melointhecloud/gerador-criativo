@@ -1040,7 +1040,7 @@ describe("setStage", () => {
 
   it("rejeita transição inválida", async () => {
     const p = await seedProject(db, { stage: "briefing" });
-    await expect(setStage(db, p.id, "review")).rejects.toThrow(/Não é possível/);
+    await expect(setStage(db, p.id, "review")).rejects.toThrow(/Não é possível ir de "[^"]+" para "Revisão"/);
   });
 
   it("não deixa sair de generating (evita um segundo conjunto de tentativas pagas)", async () => {
@@ -1154,6 +1154,7 @@ import {
 } from "@/db/schema";
 import { canTransition, stagesFor, type Mode, type Stage } from "@/domain/stages";
 import type { Deps } from "@/deps";
+import { STAGE_LABELS } from "@/lib/labels";
 import { DomainError } from "./errors";
 import { assertLabelFree } from "./labels";
 
@@ -1296,7 +1297,7 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
     throw new DomainError("Aguarde as gerações em andamento terminarem antes de mudar de etapa.");
   }
   if (!canTransition(project.mode, project.stage, target)) {
-    throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
+    throw new DomainError(`Não é possível ir de "${STAGE_LABELS[project.stage]}" para "${STAGE_LABELS[target]}"`);
   }
   await assertCanEnter(db, project, target);
   const [row] = await db
@@ -2004,7 +2005,8 @@ async function pendingSceneIdsOf(db: DbOrTx, projectId: string): Promise<Set<str
     .select({ sceneId: sceneAttempts.sceneId })
     .from(sceneAttempts)
     .innerJoin(scenes, eq(sceneAttempts.sceneId, scenes.id))
-    .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])));
+    .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])))
+    .for("update", { of: sceneAttempts }); // trava as tentativas pendentes: o worker não conclui uma enquanto decidimos o estágio
   return new Set(rows.map((r) => r.sceneId));
 }
 

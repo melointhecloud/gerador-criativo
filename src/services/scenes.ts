@@ -157,7 +157,8 @@ async function pendingSceneIdsOf(db: DbOrTx, projectId: string): Promise<Set<str
     .select({ sceneId: sceneAttempts.sceneId })
     .from(sceneAttempts)
     .innerJoin(scenes, eq(sceneAttempts.sceneId, scenes.id))
-    .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])));
+    .where(and(eq(scenes.projectId, projectId), inArray(sceneAttempts.status, ["queued", "generating"])))
+    .for("update", { of: sceneAttempts }); // trava as tentativas pendentes: o worker não conclui uma enquanto decidimos o estágio
   return new Set(rows.map((r) => r.sceneId));
 }
 

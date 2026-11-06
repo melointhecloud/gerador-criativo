@@ -18,7 +18,7 @@ import { FsStorage } from "@/storage/fs";
 import { loginThrottle } from "@/web/login-throttle";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb } from "../helpers/db";
-import { seedAsset, seedProject } from "../helpers/seed";
+import { seedAsset, seedAttempt, seedProject, seedScene } from "../helpers/seed";
 
 const env = loadEnv({
   DATABASE_URL: "postgres://x",
@@ -174,6 +174,16 @@ describe("projetos", () => {
     expect(snap.estimatedSeconds).toBe(0);
     expect(snap.scenesToGenerate).toBe(0);
     expect(snap.scenes).toEqual([]);
+    expect(snap.hasPendingGenerations).toBe(false);
+  });
+
+  it("hasPendingGenerations vem do servidor: true com tentativa na fila, false sem", async () => {
+    const p = await seedProject(testDb, { stage: "review" });
+    const scene = await seedScene(testDb, p.id, 0);
+    const get = async () => (await call(projectRoute.GET, { url: `/api/projects/${p.id}`, params: { id: p.id } })).json();
+    expect((await get()).hasPendingGenerations).toBe(false);
+    await seedAttempt(testDb, scene.id, { status: "queued" });
+    expect((await get()).hasPendingGenerations).toBe(true);
   });
 
   it("rejeita modo inválido (400) e id que não é uuid (400)", async () => {
@@ -194,7 +204,7 @@ describe("projetos", () => {
       body: { stage: "review" },
     });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("Não é possível");
+    expect((await res.json()).error).toContain("Não é possível ir de \"Briefing\" para \"Revisão\"");
   });
 
   it("a rota de etapa não aceita generating nem assembling (só as ações próprias entram nelas)", async () => {
@@ -237,6 +247,7 @@ describe("arquivos", () => {
     expect(bad.headers.get("content-range")).toBe("bytes */10");
     const ok = await call(assetRoute.GET, { params: { assetId: asset.id } });
     expect(ok.headers.get("cache-control")).toContain("private");
+    expect(ok.headers.get("vary")).toBe("Cookie");
     expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
 
     const noRow = await call(assetRoute.GET, { params: { assetId: "00000000-0000-0000-0000-000000000000" } });

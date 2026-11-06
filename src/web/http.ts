@@ -4,22 +4,17 @@ import type { Env } from "@/config/env";
 import type { Deps } from "@/deps";
 import { DomainError } from "@/services/errors";
 import { getContext } from "./context";
+import { readCookie } from "./cookie";
+
+export { readCookie };
 
 // Cabeçalhos de toda resposta com arquivo do usuário (rotas de arquivo da Task 3): nunca cache público, sem sniffing.
 export const FILE_HEADERS = {
   "Cache-Control": "private, max-age=3600",
+  Vary: "Cookie", // o cache não vale depois que o cookie muda (logout)
   "X-Content-Type-Options": "nosniff",
 } as const;
 export const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
-
-export function readCookie(header: string | null, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(";")) {
-    const [k, ...v] = part.trim().split("=");
-    if (k === name) return v.join("=");
-  }
-  return undefined;
-}
 
 // Falha fechado: qualquer erro (cookie ausente, segredo vazio, contexto indisponível) conta como não autenticado.
 export async function isAuthedCookie(cookieHeader: string | null): Promise<boolean> {

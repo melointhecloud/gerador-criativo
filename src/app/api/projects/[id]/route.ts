@@ -5,7 +5,8 @@ import { api } from "@/web/http";
 
 export const GET = api(async ({ params, deps }) => {
   const snap = await getSnapshot(deps.db, params.id);
-  return { ...snap, ...generationPlan(snap.scenes, sceneIdsWithPendingAttempt(snap.scenes)) };
+  const pending = sceneIdsWithPendingAttempt(snap.scenes);
+  return { ...snap, ...generationPlan(snap.scenes, pending), hasPendingGenerations: pending.size > 0 };
 });
 
 export const PATCH = api(async ({ req, params, deps }) => {

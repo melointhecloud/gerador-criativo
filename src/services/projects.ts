@@ -6,6 +6,7 @@ import {
 } from "@/db/schema";
 import { canTransition, stagesFor, type Mode, type Stage } from "@/domain/stages";
 import type { Deps } from "@/deps";
+import { STAGE_LABELS } from "@/lib/labels";
 import { DomainError } from "./errors";
 import { assertLabelFree } from "./labels";
 
@@ -154,7 +155,7 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
     throw new DomainError("Aguarde as gerações em andamento terminarem antes de mudar de etapa.");
   }
   if (!canTransition(project.mode, project.stage, target)) {
-    throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
+    throw new DomainError(`Não é possível ir de "${STAGE_LABELS[project.stage]}" para "${STAGE_LABELS[target]}"`);
   }
   await assertCanEnter(db, project, target);
   const [row] = await db

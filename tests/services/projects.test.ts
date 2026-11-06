@@ -160,7 +160,7 @@ describe("setStage", () => {
 
   it("rejeita transição inválida", async () => {
     const p = await seedProject(db, { stage: "briefing" });
-    await expect(setStage(db, p.id, "review")).rejects.toThrow(/Não é possível/);
+    await expect(setStage(db, p.id, "review")).rejects.toThrow(/Não é possível ir de "[^"]+" para "Revisão"/);
   });
 
   it("não deixa sair de generating (evita um segundo conjunto de tentativas pagas)", async () => {

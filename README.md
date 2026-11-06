@@ -97,6 +97,7 @@ Checklist do primeiro deploy:
 ## Segurança e operação
 
 - Escolha `ACCESS_PASSWORD` forte (12 caracteres ou mais) e `SESSION_SECRET` aleatório (32 caracteres ou mais, por exemplo `openssl rand -base64 48`). Nunca commite `.env`, chaves ou o conteúdo de `storage-data/` e `spike-out/`.
+- Todas as páginas passam por um portão central (`src/proxy.ts`): sem sessão válida, redireciona para `/login`. As rotas `/api/**` seguem respondendo 401 em JSON.
 - O `.gitignore` ignora todas as variantes `.env*` (menos `.env.example`), `*.pem` e `*.key`.
 - O limitador de tentativas de login é em memória e global (30 falhas por 15 minutos, não por IP). Zera quando o `web` reinicia e só vale para uma única réplica do `web`.
 - Sair (logout) apenas apaga o cookie: o token é sem estado e continua válido por até 14 dias. Para revogar todas as sessões, troque o `SESSION_SECRET`. Trocar apenas o `ACCESS_PASSWORD` **não** invalida as sessões existentes.
