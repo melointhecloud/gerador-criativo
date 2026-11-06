@@ -1,8 +1,9 @@
 "use client";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { AlertIcon } from "./icons";
 
-// Barra no topo das páginas autenticadas: apaga o cookie de sessão e volta ao login.
+// Fica no cabeçalho das páginas autenticadas (AppHeader): apaga o cookie de sessão e volta ao login.
 export function LogoutButton() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,11 +21,16 @@ export function LogoutButton() {
   }
 
   return (
-    <div className="topbar">
-      <button className="secondary" disabled={loading} onClick={() => void logout()}>
-        Sair
+    <>
+      {error && (
+        <span className="field-error" role="alert">
+          <AlertIcon />
+          {error}
+        </span>
+      )}
+      <button className="ghost" disabled={loading} onClick={() => void logout()}>
+        {loading ? "Saindo…" : "Sair"}
       </button>
-      {error && <span className="error" role="alert">{error}</span>}
-    </div>
+    </>
   );
 }

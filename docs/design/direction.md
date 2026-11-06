@@ -279,7 +279,7 @@ No celular, a revisão empilha: palco 9:16 em largura total (no máximo 70% da a
 | Vazio | Painel enquadrado (cantos de tungstênio) com uma frase do que falta e a ação para resolver ali mesmo. Nunca "Nenhum dado". |
 | Erro | Bloco com fundo `danger-soft`, borda esquerda em Corte, ícone e texto que diz o que aconteceu e o que fazer; `role="alert"`; junto do campo ou da ação que falhou (`aria-describedby` + `aria-invalid` nos campos). |
 | Sucesso | Selo verde com ícone de visto e o mesmo verbo da ação ("Aprovar esta versão" → "Aprovada"). Sem toasts que somem. |
-| Desabilitado | `disabled` nativo, opacidade 0,5, cursor `not-allowed`; quando o motivo não é óbvio, um texto de ajuda ao lado explica o que falta ("Aprove todas as cenas para montar"). |
+| Desabilitado | `disabled` nativo, fundo neutro (`surface-raised`), texto `text-disabled`, cursor `not-allowed` (não um tungstênio apagado, que parece defeito); quando o motivo não é óbvio, um texto de ajuda ao lado explica o que falta ("Aprove todas as cenas para montar"). |
 | Aviso (ex.: cena perdeu referência) | Texto com ícone de triângulo em Tungstênio: é algo que depende de você. |
 
 Selos de etapa seguem as duas temperaturas: etapas em que a pessoa trabalha (Briefing, Personagens, Roteiro, Revisão) em Tungstênio; etapas da máquina (Gerando cenas, Montando) em Luz do dia; Pronto em Aprovado.
@@ -311,7 +311,7 @@ O primeiro rascunho, e o que mudou:
 4. **Tipografia.** Rascunho: uma sans geométrica qualquer. Revisado para Archivo com o eixo de largura: condensada nos títulos (ecoa o quadro vertical e os créditos de cinema), normal no corpo. Uma família, duas posturas.
 5. **Rótulos e metadados.** Cortados os rótulos de seção em caixa alta, o "·" entre metadados e a monoespaçada que eu tinha posto em horários e contagens (trocada por algarismos tabulares da própria Archivo).
 6. **Ousadia em um lugar só: o enquadramento 9:16.** Cantos de visor (marcas de enquadramento em Tungstênio) aparecem só em volta do que é protagonista na tela: o formulário do login, o convite da lista vazia e, na Fase B, o palco do clipe em revisão e o vídeo final. O medidor 9:16 de cada projeto na lista é a versão miniatura do mesmo quadro. O resto fica quieto.
-7. **Espelho (tirar um acessório).** Depois das capturas: ver o relatório da Fase A para o que foi removido.
+7. **Espelho (tirar um acessório).** Depois das primeiras capturas: (a) saiu o sublinhado em tungstênio do item "Projetos" no cabeçalho (competia com as marcas de enquadramento e com a ação principal; o item atual agora só fica em Papel com peso 600); (b) o botão principal desabilitado deixou de ser um tungstênio translúcido (parecia quebrado) e virou neutro.
 
 ## 10. Melhorias de usabilidade para a Fase B
 

@@ -24,8 +24,8 @@
 | `src/web/range.ts` | Parser do header `Range` |
 | `src/app/api/**/route.ts` | Endpoints (auth, projetos, referências, personagens, roteiro, cenas, montagem, arquivos) |
 | `src/lib/api.ts`, `useProject.ts`, `types.ts`, `labels.ts` | Cliente HTTP, polling, tipos e textos da UI |
-| `src/components/*.tsx` | Painéis por etapa |
-| `src/app/layout.tsx`, `globals.css`, `page.tsx`, `login/page.tsx`, `projects/[id]/page.tsx` | Páginas |
+| `src/components/*.tsx` | Painéis por etapa, `AppHeader` (cabeçalho), `icons` (SVG) |
+| `src/app/layout.tsx`, `globals.css`, `page.tsx`, `login/page.tsx`, `projects/[id]/page.tsx`, `loading.tsx` | Páginas (visual: `docs/design/direction.md`) |
 | `Dockerfile.web`, `Dockerfile.worker`, `.dockerignore` | Imagens de deploy |
 | `README.md` | Como rodar, variáveis e deploy |
 
@@ -1750,54 +1750,44 @@ export default config;
 
 `src/app/layout.tsx`:
 ```tsx
+import type { Metadata, Viewport } from "next";
+import { Archivo } from "next/font/google";
 import type { ReactNode } from "react";
+import { AppHeader } from "@/components/AppHeader";
 import "./globals.css";
 
-export const metadata = { title: "Gerador de Criativos" };
+// Baixada no build e servida pelo próprio app (next/font): nenhuma requisição a terceiros em tempo de execução.
+// Eixo de largura: títulos condensados, corpo em largura normal (docs/design/direction.md).
+const archivo = Archivo({ subsets: ["latin", "latin-ext"], axes: ["wdth"], display: "swap", variable: "--font-archivo" });
+
+export const metadata: Metadata = {
+  title: "Gerador de Criativos",
+  description: "Ferramenta interna do time para criar vídeos verticais de anúncio (UGC e novelinha) para o TikTok.",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#1c1d20",
+  colorScheme: "dark",
+};
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="pt-BR">
-      <body>{children}</body>
+    <html lang="pt-BR" className={archivo.variable}>
+      <body>
+        <a className="skip-link" href="#conteudo">
+          Pular para o conteúdo
+        </a>
+        <AppHeader />
+        <main id="conteudo" tabIndex={-1}>
+          {children}
+        </main>
+      </body>
     </html>
   );
 }
 ```
 
-`src/app/globals.css`:
-```css
-:root { --bg: #f6f6f4; --card: #fff; --ink: #1b1b1b; --muted: #6b6b6b; --line: #e2e2dc; --accent: #111; --ok: #1a7f37; --warn: #9a6700; --bad: #b42318; }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
-main { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
-h1 { font-size: 22px; margin: 0 0 16px; } h2 { font-size: 17px; margin: 24px 0 8px; }
-a { color: inherit; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 12px; }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.muted { color: var(--muted); font-size: 13px; }
-.error { color: var(--bad); margin: 8px 0; }
-.notice { color: var(--warn); font-size: 13px; }
-input, textarea, select { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-textarea { min-height: 80px; resize: vertical; }
-button, a.button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; display: inline-block; }
-button.secondary { background: #fff; color: var(--accent); }
-button:disabled { opacity: .45; cursor: not-allowed; }
-.steps { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
-.step { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; color: var(--muted); background: #fff; }
-.step.current { background: var(--accent); color: #fff; border-color: var(--accent); }
-.step.past { color: var(--ok); }
-.badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #eee; }
-.badge.done { background: #dcfce7; color: var(--ok); } .badge.bad { background: #fee4e2; color: var(--bad); } .badge.work { background: #fef3c7; color: var(--warn); }
-img.thumb { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 8px; background: #ddd; }
-video.clip { width: 100%; max-width: 260px; aspect-ratio: 9 / 16; background: #000; border-radius: 8px; }
-.scene { display: grid; grid-template-columns: 270px 1fr; gap: 16px; }
-@media (max-width: 700px) { .scene { grid-template-columns: 1fr; } }
-.stack > * + * { margin-top: 8px; }
-.topbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
-.done-clip { width: 100%; max-width: 320px; aspect-ratio: 9 / 16; }
-.done-clip video.clip { display: block; width: 100%; height: 100%; max-width: none; aspect-ratio: auto; object-fit: contain; }
-```
+`src/app/globals.css`: o CSS completo (tokens do tema "escuro de estúdio", base, tipografia, botões, campos, selos, shell, login, lista e compatibilidade das telas do fluxo) está no próprio arquivo do repositório; a direção visual e os contrastes estão em `docs/design/direction.md`. A fonte (Archivo, eixo de largura) vem do `next/font/google` no `layout.tsx`: baixada no build e servida pelo app.
 
 `src/lib/types.ts`:
 ```ts
@@ -1929,6 +1919,7 @@ export function useProject(id: string) {
 ```tsx
 "use client";
 import { useState } from "react";
+import { AlertIcon } from "@/components/icons";
 import { api } from "@/lib/api";
 
 export default function LoginPage() {
@@ -1950,17 +1941,40 @@ export default function LoginPage() {
   }
 
   return (
-    <main style={{ maxWidth: 360 }}>
-      <h1>Gerador de Criativos</h1>
-      <form className="card stack" onSubmit={submit}>
-        <label>
-          Senha do time
-          <input aria-label="Senha do time" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
-        </label>
-        {error && <div className="error" role="alert">{error}</div>}
-        <button disabled={loading || !password}>Entrar</button>
+    <div className="page page-narrow login">
+      <form className="panel framed login-form stack stack-lg" onSubmit={submit} noValidate>
+        <div className="stack stack-sm">
+          <h1>Entrar</h1>
+          <p className="hint">Ferramenta interna do time de criativos.</p>
+        </div>
+        <div className="field">
+          <label htmlFor="senha">Senha do time</label>
+          <input
+            id="senha"
+            aria-label="Senha do time"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? "senha-erro senha-ajuda" : "senha-ajuda"}
+            autoFocus
+          />
+          {error && (
+            <p id="senha-erro" className="field-error" role="alert">
+              <AlertIcon />
+              {error}
+            </p>
+          )}
+          <p id="senha-ajuda" className="hint">
+            A senha é a mesma para todo o time. Se você não tem a senha, peça a quem administra a ferramenta.
+          </p>
+        </div>
+        <button className="button-block" disabled={loading || !password}>
+          {loading ? "Entrando…" : "Entrar"}
+        </button>
       </form>
-    </main>
+    </div>
   );
 }
 ```
@@ -1968,12 +1982,28 @@ export default function LoginPage() {
 `src/components/NewProjectForm.tsx`:
 ```tsx
 "use client";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { AlertIcon } from "./icons";
 
-export function NewProjectForm() {
+const MODES = [
+  {
+    value: "ugc",
+    title: "UGC",
+    text: "Uma pessoa fala para a câmera sobre o produto. Você envia as fotos de referência (produto, pessoa).",
+  },
+  {
+    value: "novelinha",
+    title: "Novelinha",
+    text: "Uma história curta com personagens. A ferramenta sugere os personagens e você aprova cada um.",
+  },
+] as const;
+
+// O título do formulário fica na página (muda entre a lista vazia e a lista com projetos): `labelledBy` aponta para ele.
+export function NewProjectForm({ labelledBy }: { labelledBy: string }) {
   const router = useRouter();
+  const uid = useId();
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"ugc" | "novelinha">("ugc");
   const [error, setError] = useState<string | null>(null);
@@ -1993,15 +2023,48 @@ export function NewProjectForm() {
   }
 
   return (
-    <form className="card stack" onSubmit={submit}>
-      <h2 style={{ margin: 0 }}>Novo criativo</h2>
-      <input aria-label="Nome do projeto" placeholder="Nome do projeto" value={name} onChange={(e) => setName(e.target.value)} />
-      <select aria-label="Tipo de criativo" value={mode} onChange={(e) => setMode(e.target.value as "ugc" | "novelinha")}>
-        <option value="ugc">UGC (pessoa falando para a câmera)</option>
-        <option value="novelinha">Novelinha (história com personagens)</option>
-      </select>
-      {error && <div className="error" role="alert">{error}</div>}
-      <button disabled={loading || !name.trim()}>Criar</button>
+    <form className="stack stack-lg" onSubmit={submit} aria-labelledby={labelledBy}>
+      <div className="field">
+        <label htmlFor={`${uid}-nome`}>Nome do projeto</label>
+        <input
+          id={`${uid}-nome`}
+          aria-label="Nome do projeto"
+          placeholder="Ex.: Lançamento sérum vitamina C"
+          autoComplete="off"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+      <fieldset>
+        <legend>Tipo de criativo</legend>
+        <div className="choice-group">
+          {MODES.map((m) => (
+            <label key={m.value} className="choice">
+              <input
+                type="radio"
+                name={`${uid}-modo`}
+                value={m.value}
+                checked={mode === m.value}
+                onChange={() => setMode(m.value)}
+                aria-describedby={`${uid}-${m.value}`}
+              />
+              <span className="choice-title">{m.title}</span>
+              <span id={`${uid}-${m.value}`} className="choice-text">
+                {m.text}
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      {error && (
+        <p className="field-error" role="alert">
+          <AlertIcon />
+          {error}
+        </p>
+      )}
+      <button className="button-block" disabled={loading || !name.trim()}>
+        {loading ? "Criando…" : "Criar e abrir o briefing"}
+      </button>
     </form>
   );
 }
@@ -2012,8 +2075,8 @@ export function NewProjectForm() {
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { LogoutButton } from "@/components/LogoutButton";
 import { NewProjectForm } from "@/components/NewProjectForm";
+import { stagesFor, type Stage } from "@/domain/stages";
 import { STAGE_LABELS } from "@/lib/labels";
 import { listProjects } from "@/services/projects";
 import { getContext } from "@/web/context";
@@ -2021,30 +2084,114 @@ import { isAuthedCookie } from "@/web/http";
 
 export const dynamic = "force-dynamic";
 
+// Duas temperaturas (docs/design/direction.md): tungstênio = etapa em que a pessoa trabalha; luz do dia = a máquina está trabalhando.
+const MACHINE_STAGES: Stage[] = ["generating", "assembling"];
+
+const updatedFormat = new Intl.DateTimeFormat("pt-BR", {
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "America/Sao_Paulo",
+});
+
+function stageTone(stage: Stage): "done" | "work" | "you" {
+  if (stage === "done") return "done";
+  return MACHINE_STAGES.includes(stage) ? "work" : "you";
+}
+
+// Medidor 9:16: uma faixa por etapa, de baixo para cima. Decorativo; a etapa está escrita ao lado.
+function StageMeter({ stages, current, tone }: { stages: Stage[]; current: number; tone: "done" | "work" | "you" }) {
+  return (
+    <span className={`meter meter-${tone}`} aria-hidden="true">
+      {stages.map((s, i) => (
+        <span key={s} className={i < current ? "is-past" : i === current ? "is-current" : undefined} />
+      ))}
+    </span>
+  );
+}
+
 export default async function HomePage() {
   if (!(await isAuthedCookie((await headers()).get("cookie")))) redirect("/login");
   const { deps } = await getContext();
   const list = await listProjects(deps.db);
 
-  return (
-    <main>
-      <LogoutButton />
-      <h1>Gerador de Criativos</h1>
-      <NewProjectForm />
-      <h2>Projetos</h2>
-      {list.length === 0 && <p className="muted">Nenhum projeto ainda.</p>}
-      {list.map((p) => (
-        <Link key={p.id} href={`/projects/${p.id}`} style={{ textDecoration: "none" }}>
-          <div className="card row" style={{ justifyContent: "space-between" }}>
-            <strong>{p.name}</strong>
-            <span className="row">
-              <span className="badge">{p.mode === "ugc" ? "UGC" : "Novelinha"}</span>
-              <span className="badge">{STAGE_LABELS[p.stage]}</span>
-            </span>
+  if (list.length === 0) {
+    return (
+      <div className="page page-narrow">
+        <div className="page-head">
+          <h1>Projetos</h1>
+        </div>
+        <section className="panel framed stack stack-lg" aria-labelledby="novo-criativo-titulo">
+          <div className="stack stack-sm">
+            <h2 id="novo-criativo-titulo">Nenhum criativo ainda</h2>
+            <p className="hint">
+              Dê um nome, escolha o formato e siga as etapas: briefing, roteiro, geração das cenas, revisão e o MP4 final.
+            </p>
           </div>
-        </Link>
-      ))}
-    </main>
+          <NewProjectForm labelledBy="novo-criativo-titulo" />
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page">
+      <div className="page-head">
+        <h1>Projetos</h1>
+        <p>
+          {list.length === 1 ? "1 criativo" : `${list.length} criativos`}, do mais recente ao mais antigo.
+        </p>
+        <div>
+          <a className="button secondary jump-to-new" href="#novo-criativo">
+            Novo criativo
+          </a>
+        </div>
+      </div>
+
+      <div className="projects-layout">
+        <section aria-labelledby="lista-titulo">
+          <h2 id="lista-titulo" className="sr-only">
+            Lista de projetos
+          </h2>
+          <div className="panel project-list-panel">
+            <ul className="project-list">
+              {list.map((p) => {
+                const stages = stagesFor(p.mode);
+                const index = stages.indexOf(p.stage);
+                const tone = stageTone(p.stage);
+                return (
+                  <li key={p.id}>
+                    <Link className="project-row" href={`/projects/${p.id}`}>
+                      <StageMeter stages={stages} current={index} tone={tone} />
+                      <span className="project-text">
+                        <span className="project-name">{p.name}</span>
+                        <span className="project-meta">
+                          <span>{p.mode === "ugc" ? "UGC" : "Novelinha"}</span>
+                          <span className="tabular">
+                            Etapa {index + 1} de {stages.length}
+                          </span>
+                          <span>
+                            Atualizado{" "}
+                            <time dateTime={p.updatedAt.toISOString()}>{updatedFormat.format(p.updatedAt)}</time>
+                          </span>
+                        </span>
+                      </span>
+                      <span className={`badge badge-${tone}`}>{STAGE_LABELS[p.stage]}</span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </section>
+
+        <aside className="panel projects-aside stack stack-lg" id="novo-criativo" aria-labelledby="novo-criativo-titulo">
+          <h2 id="novo-criativo-titulo">Novo criativo</h2>
+          <NewProjectForm labelledBy="novo-criativo-titulo" />
+        </aside>
+      </div>
+    </div>
   );
 }
 ```
@@ -2053,20 +2200,19 @@ export default async function HomePage() {
 ```tsx
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { LogoutButton } from "@/components/LogoutButton";
 import { ProjectView } from "@/components/ProjectView";
 import { isAuthedCookie } from "@/web/http";
 
 export const dynamic = "force-dynamic";
 
+// O <main> e o botão "Sair" vêm do layout raiz (AppHeader).
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   if (!(await isAuthedCookie((await headers()).get("cookie")))) redirect("/login");
   const { id } = await params;
   return (
-    <main>
-      <LogoutButton />
+    <div className="page">
       <ProjectView id={id} />
-    </main>
+    </div>
   );
 }
 ```
@@ -2755,13 +2901,14 @@ Expected: tudo PASS.
 
 Páginas auxiliares e botão de sair (rótulos acessíveis em todos os campos; `confirm` ao remover personagem; contador de progresso conta a tentativa atual de cada cena):
 
-`src/components/LogoutButton.tsx` (botão "Sair" no topo das páginas autenticadas; usado em `page.tsx` e `projects/[id]/page.tsx`):
+`src/components/LogoutButton.tsx` (botão "Sair" no cabeçalho das páginas autenticadas; usado por `AppHeader`):
 ```tsx
 "use client";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { AlertIcon } from "./icons";
 
-// Barra no topo das páginas autenticadas: apaga o cookie de sessão e volta ao login.
+// Fica no cabeçalho das páginas autenticadas (AppHeader): apaga o cookie de sessão e volta ao login.
 export function LogoutButton() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2779,11 +2926,102 @@ export function LogoutButton() {
   }
 
   return (
-    <div className="topbar">
-      <button className="secondary" disabled={loading} onClick={() => void logout()}>
-        Sair
+    <>
+      {error && (
+        <span className="field-error" role="alert">
+          <AlertIcon />
+          {error}
+        </span>
+      )}
+      <button className="ghost" disabled={loading} onClick={() => void logout()}>
+        {loading ? "Saindo…" : "Sair"}
       </button>
-      {error && <span className="error" role="alert">{error}</span>}
+    </>
+  );
+}
+```
+
+`src/components/AppHeader.tsx` (cabeçalho do layout: marca, navegação e "Sair"; no `/login` só a marca):
+```tsx
+"use client";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { BrandMark } from "./icons";
+import { LogoutButton } from "./LogoutButton";
+
+// Cabeçalho de todas as páginas. No /login só a marca; nas demais (todas exigem sessão, ver src/proxy.ts),
+// a navegação e o botão "Sair".
+export function AppHeader() {
+  const pathname = usePathname();
+  const isLogin = pathname === "/login";
+
+  return (
+    <header className="app-header">
+      <div className="app-header-inner">
+        {isLogin ? (
+          <span className="brand">
+            <BrandMark />
+            <span>Gerador de Criativos</span>
+          </span>
+        ) : (
+          <>
+            <Link className="brand" href="/" aria-label="Gerador de Criativos: início">
+              <BrandMark />
+              <span className="brand-name">Gerador de Criativos</span>
+            </Link>
+            <nav className="app-nav" aria-label="Principal">
+              <ul>
+                <li>
+                  <Link href="/" aria-current={pathname === "/" ? "page" : undefined}>
+                    Projetos
+                  </Link>
+                </li>
+              </ul>
+            </nav>
+            <div className="app-header-actions">
+              <LogoutButton />
+            </div>
+          </>
+        )}
+      </div>
+    </header>
+  );
+}
+```
+
+`src/components/icons.tsx` (ícones SVG inline e a marca):
+```tsx
+// Ícones inline (SVG, traço de 2 px, 24×24). Decorativos: sempre ao lado de texto visível, por isso aria-hidden.
+type IconProps = { className?: string };
+
+export function AlertIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7.5v5.5M12 16.5v.01" />
+    </svg>
+  );
+}
+
+// Marca: quadro 9:16 com cantos de visor e o cabeçote (barra de tungstênio) no centro.
+export function BrandMark({ className = "brand-mark" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 36" fill="none" aria-hidden="true" focusable="false">
+      <path d="M1 7V1h6M13 1h6v6M19 29v6h-6M7 35H1v-6" stroke="currentColor" strokeWidth="2" />
+      <rect x="8.5" y="8" width="3" height="20" rx="1" fill="var(--color-accent)" />
+    </svg>
+  );
+}
+```
+
+`src/app/loading.tsx` (carregamento enquanto a página é montada no servidor):
+```tsx
+// Enquanto a página é montada no servidor (lista de projetos, abertura de um projeto).
+export default function Loading() {
+  return (
+    <div className="page" role="status">
+      <p className="hint">Carregando…</p>
+      <div className="progress-bar loading-bar" aria-hidden="true" />
     </div>
   );
 }
@@ -2795,13 +3033,17 @@ import Link from "next/link";
 
 export default function NotFound() {
   return (
-    <main style={{ maxWidth: 480 }}>
-      <h1>Página não encontrada</h1>
-      <p className="muted">O endereço que você abriu não existe ou foi removido.</p>
-      <Link className="button" href="/">
-        Ir para o início
-      </Link>
-    </main>
+    <div className="page page-narrow stack stack-lg">
+      <div className="page-head">
+        <h1>Página não encontrada</h1>
+        <p>O endereço que você abriu não existe ou foi removido.</p>
+      </div>
+      <div>
+        <Link className="button" href="/">
+          Ir para os projetos
+        </Link>
+      </div>
+    </div>
   );
 }
 ```
@@ -2809,16 +3051,20 @@ export default function NotFound() {
 `src/app/error.tsx` (erro genérico em pt-BR):
 ```tsx
 "use client";
+import { AlertIcon } from "@/components/icons";
 
 export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (
-    <main style={{ maxWidth: 480 }}>
+    <div className="page page-narrow stack stack-lg">
       <h1>Algo deu errado</h1>
-      <p className="error" role="alert">
-        Não foi possível carregar esta página. Tente de novo; se o problema continuar, avise o time.
+      <p className="alert" role="alert">
+        <AlertIcon />
+        <span>Não foi possível carregar esta página. Tente de novo; se o problema continuar, avise o time.</span>
       </p>
-      <button onClick={() => reset()}>Tentar de novo</button>
-    </main>
+      <div>
+        <button onClick={() => reset()}>Tentar de novo</button>
+      </div>
+    </div>
   );
 }
 ```

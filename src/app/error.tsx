@@ -1,13 +1,17 @@
 "use client";
+import { AlertIcon } from "@/components/icons";
 
 export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (
-    <main style={{ maxWidth: 480 }}>
+    <div className="page page-narrow stack stack-lg">
       <h1>Algo deu errado</h1>
-      <p className="error" role="alert">
-        Não foi possível carregar esta página. Tente de novo; se o problema continuar, avise o time.
+      <p className="alert" role="alert">
+        <AlertIcon />
+        <span>Não foi possível carregar esta página. Tente de novo; se o problema continuar, avise o time.</span>
       </p>
-      <button onClick={() => reset()}>Tentar de novo</button>
-    </main>
+      <div>
+        <button onClick={() => reset()}>Tentar de novo</button>
+      </div>
+    </div>
   );
 }
