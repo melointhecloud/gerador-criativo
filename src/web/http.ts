@@ -41,11 +41,12 @@ const json = (body: unknown, status = 200) => Response.json(body, { status, head
 // Resumo em pt-BR (as mensagens nativas do Zod são em inglês).
 export function describeZodError(e: z.ZodError): string {
   const parts = e.issues.slice(0, 5).map((i) => {
-    const field = i.path.length ? i.path.join(".") : "corpo da requisição";
+    const field = i.path.length ? i.path.map(String).join(".") : "corpo da requisição";
     let why: string;
     switch (i.code) {
       case "invalid_type":
-        why = i.input === undefined ? "campo obrigatório" : "tipo inválido";
+        // O Zod v4 não expõe o valor recebido na issue; a mensagem nativa traz "received undefined" quando falta o campo.
+        why = /received undefined/.test(i.message) ? "campo obrigatório" : "tipo inválido";
         break;
       case "too_small":
         why = "valor curto ou pequeno demais";
@@ -68,6 +69,24 @@ export function describeZodError(e: z.ZodError): string {
     return `${field}: ${why}`;
   });
   return `Dados inválidos (${parts.join("; ")})`;
+}
+
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+// Defesa de CSRF além do SameSite do cookie: em métodos que alteram estado, bloqueia requisições vindas de outra origem.
+// Sem Sec-Fetch-Site nem Origin (curl, testes, navegadores antigos em same-origin) a requisição segue.
+export function isCrossOrigin(req: Request): boolean {
+  if (SAFE_METHODS.has(req.method.toUpperCase())) return false;
+  const site = req.headers.get("sec-fetch-site");
+  if (site !== null) return site !== "same-origin" && site !== "none";
+  const origin = req.headers.get("origin");
+  if (origin === null) return false;
+  const host = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim() || req.headers.get("host");
+  try {
+    return new URL(origin).host !== host;
+  } catch {
+    return true;
+  }
 }
 
 // Envolve um endpoint: autentica (fail closed), valida ids da URL, converte erros em JSON pt-BR.
@@ -94,6 +113,8 @@ export function api(handler: (a: ApiArgs) => Promise<unknown>, opts: { auth?: bo
         }
         if (!ok) return json({ error: "Não autorizado" }, 401);
       }
+      // Vale também para auth:false (login é um POST que altera estado).
+      if (isCrossOrigin(req)) return json({ error: "Requisição bloqueada por segurança (origem diferente)." }, 403);
       const params = ctx?.params ? await ctx.params : {};
       for (const v of Object.values(params)) {
         if (!uuid.safeParse(v).success) throw new DomainError("Identificador inválido", 400);

@@ -8,6 +8,7 @@ describe("parseRange", () => {
   it("intervalo fechado e aberto", () => {
     expect(parseRange("bytes=0-9", 100)).toEqual({ start: 0, end: 9 });
     expect(parseRange("bytes=90-", 100)).toEqual({ start: 90, end: 99 });
+    expect(parseRange("bytes=0-0", 100)).toEqual({ start: 0, end: 0 });
   });
   it("sufixo: últimos N bytes", () => {
     expect(parseRange("bytes=-10", 100)).toEqual({ start: 90, end: 99 });
