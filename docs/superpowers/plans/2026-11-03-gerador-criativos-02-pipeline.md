@@ -496,6 +496,7 @@ git commit -m "feat(modules): script planner with schema validation and retries"
 import { describe, expect, it } from "vitest";
 import { proposeCharacters } from "@/modules/character-designer";
 import { FakeTextModel } from "@/providers/fake";
+import { ProviderError } from "@/providers/types";
 
 const copy = "Maria flagra Carlos com a vizinha Helena e decide se vingar.";
 
@@ -518,9 +519,29 @@ describe("proposeCharacters", () => {
     expect(out).toHaveLength(1);
   });
 
-  it("rejeita resposta sem personagens", async () => {
-    const text = new FakeTextModel([{ characters: [] }]);
-    await expect(proposeCharacters(text, copy)).rejects.toThrow();
+  it("rejeita resposta sem personagens após 3 tentativas", async () => {
+    const text = new FakeTextModel([{ characters: [] }, { characters: [] }, { characters: [] }]);
+    await expect(proposeCharacters(text, copy)).rejects.toThrow(/após 3 tentativas/);
+    expect(text.calls).toHaveLength(3);
+  });
+
+  it("tenta de novo quando a primeira resposta é inválida", async () => {
+    const text = new FakeTextModel([
+      { characters: [] },
+      { characters: [{ name: "Maria", description: "Mulher de 35 anos" }] },
+    ]);
+    const out = await proposeCharacters(text, copy);
+    expect(out).toEqual([{ name: "Maria", description: "Mulher de 35 anos" }]);
+    expect(text.calls).toHaveLength(2);
+  });
+
+  it("não tenta de novo em erro que não é de validação", async () => {
+    const boom = new ProviderError("falha", false);
+    const text = new FakeTextModel(() => {
+      throw boom;
+    });
+    await expect(proposeCharacters(text, copy)).rejects.toBe(boom);
+    expect(text.calls).toHaveLength(1);
   });
 });
 ```
@@ -583,7 +604,7 @@ export async function proposeCharacters(text: TextModel, copy: string): Promise<
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/character-designer.test.ts`
-Expected: 3 testes PASS.
+Expected: 5 testes PASS.
 
 - [ ] **Step 5: Commit**
 
