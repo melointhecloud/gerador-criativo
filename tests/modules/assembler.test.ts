@@ -6,6 +6,8 @@ import { assets, projects, scenes } from "@/db/schema";
 import { concatClips, handleAssemble, onAssembleDead } from "@/modules/assembler";
 import { makeTestClip, probe, withTempDir } from "@/modules/ffmpeg";
 import { PermanentError } from "@/queue/errors";
+import { enqueue, fail } from "@/queue/queue";
+import { getSnapshot } from "@/services/projects";
 import { makeClipBytes, makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAsset, seedAttempt, seedProject, seedScene } from "../helpers/seed";
@@ -133,5 +135,19 @@ describe("onAssembleDead", () => {
     await db.update(projects).set({ stage: "done" }).where(eq(projects.id, p.id));
     await onAssembleDead(m.deps, { projectId: p.id }, "x");
     expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("done");
+  });
+
+  it("de ponta a ponta: falha da montagem volta para a revisão e o motivo aparece no snapshot", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await db.update(assets).set({ storageKey: `projects/${p.id}/clips/sumiu.mp4` }).where(eq(assets.kind, "clip"));
+    const job = await enqueue(db, "assemble", { projectId: p.id });
+    const err = await handleAssemble(m.deps, { projectId: p.id }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PermanentError);
+    const message = (err as Error).message;
+    await fail(db, job, message, false); // o runner faz isto e depois chama onAssembleDead
+    await onAssembleDead(m.deps, { projectId: p.id }, message);
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("review");
+    expect(snap.assembleError).toMatch(/arquivo do clipe da cena 1/);
   });
 });

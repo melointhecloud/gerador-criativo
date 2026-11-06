@@ -1660,6 +1660,7 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
           </span>
         )}
       </div>
+      {reviewing && snap.assembleError && <div className="error">A montagem falhou: {snap.assembleError}</div>}
       {scenes.map((s, i) => (
         <SceneCard key={s.id} scene={s} index={i} run={run} working={working} reviewing={reviewing} />
       ))}
@@ -1855,7 +1856,7 @@ Subir `docker compose up -d`, `pnpm db:migrate`, `pnpm dev` e `pnpm worker`. No 
 6. Pedir ajuste (“só uma cena”) → confirmar o aviso de descarte → roteiro regenera.
 7. “Aprovar roteiro e gerar cenas” → confirmar → etapa “Gerando cenas” com contador; em ~20–30 s todas ficam prontas e a etapa muda sozinha para Revisão.
 8. Tocar um clipe (vídeo de teste colorido com tom). Regerar uma cena → vira v2; alternar entre v1 e v2; aprovar a v1.
-9. Aprovar todas → “Montar vídeo final” → etapa “Montando” → etapa Pronto com player.
+9. Aprovar todas → “Montar vídeo final” → etapa “Montando” → etapa Pronto com player. Se a montagem falhar, o projeto volta à Revisão e o aviso “A montagem falhou: …” (`snap.assembleError`) aparece acima das cenas até uma nova montagem ser pedida.
 10. “Baixar MP4” e conferir: `ffprobe -v error -show_entries stream=width,height,codec_type -of csv=p=0 <arquivo>` mostra `720,1280` de vídeo e uma trilha de áudio.
 
 - [ ] **Step 2: Fluxo novelinha local**

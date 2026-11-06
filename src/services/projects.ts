@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "@/db/client";
 import {
-  assets, characters, projects, sceneAttempts, sceneReferences, scenes,
+  assets, characters, jobs, projects, sceneAttempts, sceneReferences, scenes,
 } from "@/db/schema";
 import { canTransition, stagesFor, type Mode, type Stage } from "@/domain/stages";
 import type { Deps } from "@/deps";
@@ -21,6 +21,7 @@ export type Snapshot = {
   characters: Character[];
   scenes: SceneView[];
   finalAsset: Asset | null;
+  assembleError: string | null;
 };
 
 const IMAGE_TYPES: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
@@ -156,6 +157,17 @@ export async function getSnapshot(db: Db, projectId: string): Promise<Snapshot> 
       ])
     : [[], []];
 
+  // Só o job de montagem mais recente conta: se ele falhou, o motivo (jobs.error, gravado por fail()) vai para a UI;
+  // um job novo (na fila, rodando ou concluído) limpa o aviso sem lógica de timestamp.
+  const [lastAssemble] = await db
+    .select({ status: jobs.status, error: jobs.error })
+    .from(jobs)
+    .where(and(eq(jobs.type, "assemble"), sql`${jobs.payload}->>'projectId' = ${projectId}`))
+    .orderBy(desc(jobs.createdAt))
+    .limit(1);
+  const assembleError =
+    lastAssemble?.status === "failed" ? (lastAssemble.error ?? "A montagem falhou. Tente montar novamente.") : null;
+
   const assetById = new Map(allAssets.map((a) => [a.id, a]));
   const finals = allAssets.filter((a) => a.kind === "final");
   return {
@@ -168,5 +180,6 @@ export async function getSnapshot(db: Db, projectId: string): Promise<Snapshot> 
       references: links.filter((l) => l.sceneId === s.id).map((l) => assetById.get(l.assetId)!).filter(Boolean),
     })),
     finalAsset: finals.length ? finals[finals.length - 1]! : null,
+    assembleError,
   };
 }

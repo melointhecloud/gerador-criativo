@@ -5,6 +5,7 @@ import { DomainError } from "@/services/errors";
 import {
   addReference, advanceToReviewIfIdle, createProject, getSnapshot, removeReference, setStage, updateBriefing,
 } from "@/services/projects";
+import { enqueue, fail } from "@/queue/queue";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
@@ -128,6 +129,35 @@ describe("getSnapshot", () => {
     expect(snap.scenes.map((s) => s.id)).toEqual([s0.id, s1.id]);
     expect(snap.scenes[0]!.attempts).toHaveLength(1);
     expect(snap.finalAsset).toBeNull();
+  });
+
+  it("assembleError é null quando não há job de montagem", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    expect((await getSnapshot(db, p.id)).assembleError).toBeNull();
+  });
+
+  it("expõe a mensagem do job de montagem mais recente quando ele falhou", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const job = await enqueue(db, "assemble", { projectId: p.id });
+    await fail(db, job, "Falta o clipe da cena 2", false);
+    expect((await getSnapshot(db, p.id)).assembleError).toBe("Falta o clipe da cena 2");
+  });
+
+  it("um job de montagem mais novo (na fila) limpa o assembleError", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const job = await enqueue(db, "assemble", { projectId: p.id });
+    await fail(db, job, "Falta o clipe da cena 2", false);
+    await enqueue(db, "assemble", { projectId: p.id });
+    expect((await getSnapshot(db, p.id)).assembleError).toBeNull();
+  });
+
+  it("não expõe a falha de montagem de outro projeto", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const other = await seedProject(db, { stage: "review" });
+    const job = await enqueue(db, "assemble", { projectId: other.id });
+    await fail(db, job, "erro do outro", false);
+    expect((await getSnapshot(db, p.id)).assembleError).toBeNull();
+    expect((await getSnapshot(db, other.id)).assembleError).toBe("erro do outro");
   });
 
   it("404 para projeto inexistente", async () => {

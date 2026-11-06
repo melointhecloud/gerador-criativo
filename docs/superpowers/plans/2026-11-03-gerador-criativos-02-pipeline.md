@@ -836,6 +836,7 @@ import { DomainError } from "@/services/errors";
 import {
   addReference, advanceToReviewIfIdle, createProject, getSnapshot, removeReference, setStage, updateBriefing,
 } from "@/services/projects";
+import { enqueue, fail } from "@/queue/queue";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
@@ -961,6 +962,35 @@ describe("getSnapshot", () => {
     expect(snap.finalAsset).toBeNull();
   });
 
+  it("assembleError é null quando não há job de montagem", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    expect((await getSnapshot(db, p.id)).assembleError).toBeNull();
+  });
+
+  it("expõe a mensagem do job de montagem mais recente quando ele falhou", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const job = await enqueue(db, "assemble", { projectId: p.id });
+    await fail(db, job, "Falta o clipe da cena 2", false);
+    expect((await getSnapshot(db, p.id)).assembleError).toBe("Falta o clipe da cena 2");
+  });
+
+  it("um job de montagem mais novo (na fila) limpa o assembleError", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const job = await enqueue(db, "assemble", { projectId: p.id });
+    await fail(db, job, "Falta o clipe da cena 2", false);
+    await enqueue(db, "assemble", { projectId: p.id });
+    expect((await getSnapshot(db, p.id)).assembleError).toBeNull();
+  });
+
+  it("não expõe a falha de montagem de outro projeto", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const other = await seedProject(db, { stage: "review" });
+    const job = await enqueue(db, "assemble", { projectId: other.id });
+    await fail(db, job, "erro do outro", false);
+    expect((await getSnapshot(db, p.id)).assembleError).toBeNull();
+    expect((await getSnapshot(db, other.id)).assembleError).toBe("erro do outro");
+  });
+
   it("404 para projeto inexistente", async () => {
     await expect(getSnapshot(db, "00000000-0000-0000-0000-000000000000")).rejects.toMatchObject({ status: 404 });
   });
@@ -976,10 +1006,10 @@ Expected: FAIL — `@/services/projects` não encontrado.
 
 ```ts
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "@/db/client";
 import {
-  assets, characters, projects, sceneAttempts, sceneReferences, scenes,
+  assets, characters, jobs, projects, sceneAttempts, sceneReferences, scenes,
 } from "@/db/schema";
 import { canTransition, stagesFor, type Mode, type Stage } from "@/domain/stages";
 import type { Deps } from "@/deps";
@@ -998,6 +1028,7 @@ export type Snapshot = {
   characters: Character[];
   scenes: SceneView[];
   finalAsset: Asset | null;
+  assembleError: string | null; // motivo da última montagem que falhou (jobs.error); null se a mais recente não falhou
 };
 
 const IMAGE_TYPES: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
@@ -1133,6 +1164,17 @@ export async function getSnapshot(db: Db, projectId: string): Promise<Snapshot> 
       ])
     : [[], []];
 
+  // Só o job de montagem mais recente conta: se ele falhou, o motivo (jobs.error, gravado por fail()) vai para a UI;
+  // um job novo (na fila, rodando ou concluído) limpa o aviso sem lógica de timestamp.
+  const [lastAssemble] = await db
+    .select({ status: jobs.status, error: jobs.error })
+    .from(jobs)
+    .where(and(eq(jobs.type, "assemble"), sql`${jobs.payload}->>'projectId' = ${projectId}`))
+    .orderBy(desc(jobs.createdAt))
+    .limit(1);
+  const assembleError =
+    lastAssemble?.status === "failed" ? (lastAssemble.error ?? "A montagem falhou. Tente montar novamente.") : null;
+
   const assetById = new Map(allAssets.map((a) => [a.id, a]));
   const finals = allAssets.filter((a) => a.kind === "final");
   return {
@@ -1145,6 +1187,7 @@ export async function getSnapshot(db: Db, projectId: string): Promise<Snapshot> 
       references: links.filter((l) => l.sceneId === s.id).map((l) => assetById.get(l.assetId)!).filter(Boolean),
     })),
     finalAsset: finals.length ? finals[finals.length - 1]! : null,
+    assembleError,
   };
 }
 ```
@@ -2607,6 +2650,8 @@ import { assets, projects, scenes } from "@/db/schema";
 import { concatClips, handleAssemble, onAssembleDead } from "@/modules/assembler";
 import { makeTestClip, probe, withTempDir } from "@/modules/ffmpeg";
 import { PermanentError } from "@/queue/errors";
+import { enqueue, fail } from "@/queue/queue";
+import { getSnapshot } from "@/services/projects";
 import { makeClipBytes, makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAsset, seedAttempt, seedProject, seedScene } from "../helpers/seed";
@@ -2734,6 +2779,20 @@ describe("onAssembleDead", () => {
     await db.update(projects).set({ stage: "done" }).where(eq(projects.id, p.id));
     await onAssembleDead(m.deps, { projectId: p.id }, "x");
     expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("done");
+  });
+
+  it("de ponta a ponta: falha da montagem volta para a revisão e o motivo aparece no snapshot", async () => {
+    const { m, p } = await projectReadyToAssemble(1);
+    await db.update(assets).set({ storageKey: `projects/${p.id}/clips/sumiu.mp4` }).where(eq(assets.kind, "clip"));
+    const job = await enqueue(db, "assemble", { projectId: p.id });
+    const err = await handleAssemble(m.deps, { projectId: p.id }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PermanentError);
+    const message = (err as Error).message;
+    await fail(db, job, message, false); // o runner faz isto e depois chama onAssembleDead
+    await onAssembleDead(m.deps, { projectId: p.id }, message);
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("review");
+    expect(snap.assembleError).toMatch(/arquivo do clipe da cena 1/);
   });
 });
 ```
@@ -2883,12 +2942,12 @@ export async function onAssembleDead(deps: Deps, payload: { projectId: string },
 }
 ```
 
-Notas (divergências em relação à primeira versão do plano): o handler ignora o job se o projeto não está em `assembling` (idempotência); o asset final (chave fixa `projects/<id>/final/final.mp4`) e a etapa `done` são gravados numa só transação sob `SELECT ... FOR UPDATE` do projeto; clipe ausente/corrompido vira `PermanentError` em português; `onAssembleDead` usa UPDATE condicional (`assembling` -> `review`) pois `canTransition` não deixa sair de `assembling`. A mensagem do erro fica em `jobs.error` (gravada pelo runner, Task 10).
+Notas (divergências em relação à primeira versão do plano): o handler ignora o job se o projeto não está em `assembling` (idempotência); o asset final (chave fixa `projects/<id>/final/final.mp4`) e a etapa `done` são gravados numa só transação sob `SELECT ... FOR UPDATE` do projeto; clipe ausente/corrompido vira `PermanentError` em português; `onAssembleDead` usa UPDATE condicional (`assembling` -> `review`) pois `canTransition` não deixa sair de `assembling`. A mensagem do erro fica em `jobs.error` (gravada pelo runner, Task 10) e `getSnapshot` (Task 5) a expõe como `assembleError` quando o job `assemble` mais recente do projeto está `failed`; um job novo a limpa.
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/assembler.test.ts && pnpm typecheck`
-Expected: 10 testes PASS; typecheck limpo.
+Expected: 11 testes PASS; typecheck limpo.
 
 - [ ] **Step 5: Commit**
 
@@ -3066,7 +3125,7 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
     }
     const message = e instanceof Error ? e.message : String(e);
     const retryable = !(e instanceof PermanentError) && !(e instanceof ProviderError && !e.retryable);
-    const outcome = await fail(db, job, message, retryable);
+    const outcome = await fail(db, job, message, retryable); // grava a mensagem em jobs.error; getSnapshot a lê (assembleError)
     if (outcome === "dead" && handler.onDead) {
       try {
         await handler.onDead(job.payload, message);
