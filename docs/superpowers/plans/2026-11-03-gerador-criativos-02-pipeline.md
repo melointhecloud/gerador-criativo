@@ -2378,6 +2378,36 @@ describe("proposeProjectCharacters", () => {
     expect(queued.map((j) => j.type)).toEqual(["generate_character", "generate_character"]);
   });
 
+  it("avisa as cenas que usavam os personagens antigos e preserva o roteiro", async () => {
+    const m = await makeDeps({ text: [{ characters: [{ name: "Nova", description: "30 anos" }] }] });
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "Ana" });
+    await seedCharacter(db, p.id, { name: "Ana", imageStatus: "ready", assetId: img.id });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [img.id] });
+    const s2 = await seedScene(db, p.id, 1, {});
+    const notice = async (id: string) => (await db.select().from(scenes).where(eq(scenes.id, id)))[0]!.notice;
+    await proposeProjectCharacters(m.deps, p.id);
+    expect(await notice(s1.id)).toBe(
+      "A referência “Ana” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.",
+    );
+    expect(await notice(s2.id)).toBeNull();
+    expect((await db.select().from(characters).where(eq(characters.projectId, p.id))).map((c) => c.name)).toEqual(["Nova"]);
+    expect((await db.select().from(jobs)).map((j) => j.type)).toEqual(["generate_character"]);
+  });
+
+  it("sem cenas, re-sugerir apenas troca os personagens e enfileira as imagens", async () => {
+    const m = await makeDeps({ text: [{ characters: [{ name: "Nova", description: "30 anos" }] }] });
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "Ana" });
+    await seedCharacter(db, p.id, { name: "Ana", imageStatus: "ready", assetId: img.id });
+    await proposeProjectCharacters(m.deps, p.id);
+    expect((await db.select().from(characters).where(eq(characters.projectId, p.id))).map((c) => c.name)).toEqual(["Nova"]);
+    expect(await db.select().from(assets).where(eq(assets.id, img.id))).toHaveLength(0);
+    expect((await db.select().from(jobs)).map((j) => j.type)).toEqual(["generate_character"]);
+  });
+
   it("só na etapa de personagens e só em novelinha", async () => {
     const m = await makeDeps({ text: [] });
     cleanup = m.cleanup;
@@ -2800,7 +2830,11 @@ export async function proposeProjectCharacters(deps: Deps, projectId: string): P
     await assertCharactersStage(tx, projectId); // a etapa pode ter mudado durante a chamada ao modelo
     const old = await tx.select().from(characters).where(eq(characters.projectId, projectId));
     await tx.delete(characters).where(eq(characters.projectId, projectId));
-    for (const c of old) if (c.assetId) await tx.delete(assets).where(eq(assets.id, c.assetId));
+    for (const c of old) {
+      if (!c.assetId) continue;
+      await noteRemovedReference(tx, c.assetId, c.name); // antes de apagar a imagem (a FK some com as referências)
+      await tx.delete(assets).where(eq(assets.id, c.assetId));
+    }
 
     for (const [position, p] of proposals.entries()) {
       const [row] = await tx

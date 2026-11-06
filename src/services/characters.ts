@@ -47,7 +47,11 @@ export async function proposeProjectCharacters(deps: Deps, projectId: string): P
     await assertCharactersStage(tx, projectId); // a etapa pode ter mudado durante a chamada ao modelo
     const old = await tx.select().from(characters).where(eq(characters.projectId, projectId));
     await tx.delete(characters).where(eq(characters.projectId, projectId));
-    for (const c of old) if (c.assetId) await tx.delete(assets).where(eq(assets.id, c.assetId));
+    for (const c of old) {
+      if (!c.assetId) continue;
+      await noteRemovedReference(tx, c.assetId, c.name); // antes de apagar a imagem (a FK some com as referências)
+      await tx.delete(assets).where(eq(assets.id, c.assetId));
+    }
 
     for (const [position, p] of proposals.entries()) {
       const [row] = await tx
