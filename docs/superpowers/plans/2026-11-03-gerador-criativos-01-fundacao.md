@@ -133,8 +133,10 @@ export default defineConfig({
 ```
 node_modules/
 .next/
-.env
-.env.local
+.env*
+!.env.example
+*.pem
+*.key
 storage-data/
 spike-out/
 *.tsbuildinfo
