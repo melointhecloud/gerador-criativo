@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { Db, DbOrTx } from "@/db/client";
 import {
   assets, characters, projects, sceneAttempts, sceneReferences, scenes,
 } from "@/db/schema";
@@ -37,7 +37,7 @@ export async function listProjects(db: Db): Promise<Project[]> {
   return db.select().from(projects).orderBy(desc(projects.updatedAt));
 }
 
-export async function getProject(db: Db, id: string): Promise<Project> {
+export async function getProject(db: DbOrTx, id: string): Promise<Project> {
   const [row] = await db.select().from(projects).where(eq(projects.id, id));
   if (!row) throw new DomainError("Projeto não encontrado", 404);
   return row;
@@ -87,7 +87,7 @@ export async function removeReference(db: Db, assetId: string): Promise<void> {
   await db.delete(assets).where(eq(assets.id, assetId));
 }
 
-async function assertCanEnter(db: Db, project: Project, target: Stage): Promise<void> {
+async function assertCanEnter(db: DbOrTx, project: Project, target: Stage): Promise<void> {
   const order = stagesFor(project.mode);
   if (order.indexOf(target) <= order.indexOf(project.stage)) return; // voltar não tem pré-condição
 
@@ -109,7 +109,9 @@ async function assertCanEnter(db: Db, project: Project, target: Stage): Promise<
   }
 }
 
-export async function setStage(db: Db, projectId: string, target: Stage): Promise<Project> {
+// A troca é condicional à etapa lida (compare-and-set): duas chamadas concorrentes não passam juntas.
+// Dentro de uma transação, o UPDATE também segura o lock da linha do projeto até o commit.
+export async function setStage(db: DbOrTx, projectId: string, target: Stage): Promise<Project> {
   const project = await getProject(db, projectId);
   if (!canTransition(project.mode, project.stage, target)) {
     throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
@@ -118,9 +120,10 @@ export async function setStage(db: Db, projectId: string, target: Stage): Promis
   const [row] = await db
     .update(projects)
     .set({ stage: target, updatedAt: new Date() })
-    .where(eq(projects.id, projectId))
+    .where(and(eq(projects.id, projectId), eq(projects.stage, project.stage)))
     .returning();
-  return row!;
+  if (!row) throw new DomainError("O projeto mudou de etapa; atualize a página e tente de novo");
+  return row;
 }
 
 // Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.

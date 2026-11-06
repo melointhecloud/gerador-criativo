@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { jobs, projects, sceneAttempts, scenes } from "@/db/schema";
+import { jobs, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
+import { enqueue } from "@/queue/queue";
 import {
   approveAttempt, generateAllScenes, planProjectScript, regenerateAllScenes, regenerateScene,
   startAssembly, totalSeconds, updateScene,
@@ -9,6 +10,12 @@ import { getSnapshot } from "@/services/projects";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAsset, seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
+
+// enqueue delega ao real; os testes de atomicidade fazem a próxima chamada falhar (mockRejectedValueOnce).
+vi.mock("@/queue/queue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/queue/queue")>();
+  return { ...actual, enqueue: vi.fn(actual.enqueue) };
+});
 
 beforeEach(resetDb);
 let cleanup: () => Promise<void>;
@@ -58,6 +65,22 @@ describe("planProjectScript", () => {
     expect(m.text.calls[1]!.prompt).toContain("Close no produto");
   });
 
+  it("persiste o aviso e limita as referências quando o roteiro cita imagens demais", async () => {
+    const labels = ["a", "b", "c", "d", "e"]; // maxSceneReferences = 3
+    const m = await makeDeps({ text: [draft(labels)] });
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "ugc", stage: "script" });
+    for (const l of labels) await seedAsset(db, p.id, { kind: "reference", label: l });
+    await planProjectScript(m.deps, p.id);
+    const rows = await db.select().from(scenes).where(eq(scenes.projectId, p.id));
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.notice).toBeTruthy();
+      const links = await db.select().from(sceneReferences).where(eq(sceneReferences.sceneId, row.id));
+      expect(links).toHaveLength(3);
+    }
+  });
+
   it("só funciona na etapa de roteiro", async () => {
     const m = await makeDeps({ text: [draft()] });
     cleanup = m.cleanup;
@@ -103,6 +126,31 @@ describe("generateAllScenes", () => {
     const queued = await db.select().from(jobs);
     expect(queued).toHaveLength(2);
     expect(queued.every((j) => j.type === "generate_scene")).toBe(true);
+  });
+
+  it("chamadas concorrentes criam uma única tentativa e um único job por cena", async () => {
+    const { m, p } = await projectWithScript();
+    const results = await Promise.allSettled([generateAllScenes(m.deps, p.id), generateAllScenes(m.deps, p.id)]);
+    // Comportamento escolhido: a segunda chamada é rejeitada com erro em português (não é no-op).
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason.message)).toMatch(/etapa/);
+    const attempts = await db.select().from(sceneAttempts);
+    expect(attempts).toHaveLength(2);
+    expect(new Set(attempts.map((a) => a.sceneId)).size).toBe(2);
+    expect(await db.select().from(jobs)).toHaveLength(2);
+  });
+
+  it("se o enqueue falha no meio, nada é gravado e o projeto continua em roteiro", async () => {
+    const { m, p } = await projectWithScript();
+    const real = await vi.importActual<typeof import("@/queue/queue")>("@/queue/queue");
+    vi.mocked(enqueue)
+      .mockImplementationOnce(real.enqueue)
+      .mockRejectedValueOnce(new Error("fila indisponível"));
+    await expect(generateAllScenes(m.deps, p.id)).rejects.toThrow(/fila indisponível/);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("script");
+    expect(await db.select().from(sceneAttempts)).toHaveLength(0);
+    expect(await db.select().from(jobs)).toHaveLength(0);
   });
 
   it("exige ao menos uma cena", async () => {
@@ -151,6 +199,38 @@ describe("regenerateScene / regenerateAllScenes", () => {
     const { m, s0 } = await inReview();
     await regenerateScene(m.deps, s0.id);
     await expect(regenerateScene(m.deps, s0.id)).rejects.toThrow(/andamento/);
+  });
+
+  it("chamadas concorrentes na mesma cena criam uma só tentativa e um só job", async () => {
+    const { m, s0 } = await inReview();
+    // Comportamento escolhido: a segunda chamada é rejeitada com "geração em andamento".
+    const results = await Promise.allSettled([regenerateScene(m.deps, s0.id), regenerateScene(m.deps, s0.id)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason.message)).toMatch(/andamento/);
+    const attempts = await db.select().from(sceneAttempts).where(eq(sceneAttempts.sceneId, s0.id));
+    expect(attempts.filter((a) => a.status === "queued")).toHaveLength(1);
+    expect(await db.select().from(jobs)).toHaveLength(1);
+  });
+
+  it("regenerar todas concorrente não duplica tentativas", async () => {
+    const { m, p } = await inReview();
+    await Promise.all([regenerateAllScenes(m.deps, p.id), regenerateAllScenes(m.deps, p.id)]);
+    expect(await db.select().from(sceneAttempts).where(eq(sceneAttempts.status, "queued"))).toHaveLength(2);
+    expect(await db.select().from(jobs)).toHaveLength(2);
+  });
+
+  it("se o enqueue falha, não sobra tentativa órfã nem se perde a aprovação", async () => {
+    const { m, s0, a0 } = await inReview();
+    vi.mocked(enqueue).mockRejectedValueOnce(new Error("fila indisponível"));
+    await expect(regenerateScene(m.deps, s0.id)).rejects.toThrow(/fila indisponível/);
+    const attempts = await db.select().from(sceneAttempts).where(eq(sceneAttempts.sceneId, s0.id));
+    expect(attempts.map((a) => a.id)).toEqual([a0.id]);
+    const [scene] = await db.select().from(scenes).where(eq(scenes.id, s0.id));
+    expect(scene!.approvedAttemptId).toBe(a0.id);
+    expect(await db.select().from(jobs)).toHaveLength(0);
+    await regenerateScene(m.deps, s0.id); // a cena não ficou bloqueada
+    expect(await db.select().from(jobs)).toHaveLength(1);
   });
 
   it("regenerar todas cria uma tentativa por cena", async () => {
@@ -208,5 +288,26 @@ describe("startAssembly", () => {
     expect(queued).toHaveLength(1);
     expect(queued[0]!.type).toBe("assemble");
     expect(queued[0]!.payload).toEqual({ projectId: p.id });
+  });
+
+  it("se o enqueue falha, o projeto não fica preso em assembling", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const s = await seedScene(db, p.id, 0);
+    const a = await seedAttempt(db, s.id, { status: "done" });
+    await db.update(scenes).set({ approvedAttemptId: a.id }).where(eq(scenes.id, s.id));
+    vi.mocked(enqueue).mockRejectedValueOnce(new Error("fila indisponível"));
+    await expect(startAssembly(db, p.id)).rejects.toThrow(/fila indisponível/);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+    expect(await db.select().from(jobs)).toHaveLength(0);
+  });
+
+  it("chamadas concorrentes enfileiram uma única montagem", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const s = await seedScene(db, p.id, 0);
+    const a = await seedAttempt(db, s.id, { status: "done" });
+    await db.update(scenes).set({ approvedAttemptId: a.id }).where(eq(scenes.id, s.id));
+    const results = await Promise.allSettled([startAssembly(db, p.id), startAssembly(db, p.id)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await db.select().from(jobs)).toHaveLength(1);
   });
 });

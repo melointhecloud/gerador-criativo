@@ -1,5 +1,5 @@
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { Db, DbOrTx } from "@/db/client";
 import { assets, characters, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { buildScenePrompt } from "@/modules/prompt";
@@ -103,31 +103,40 @@ export async function updateScene(
   return row!;
 }
 
-async function createAttempt(deps: Deps, scene: Scene, mode: "ugc" | "novelinha", promptOverride?: string) {
-  const { db } = deps;
-  const links = await db.select().from(sceneReferences).where(eq(sceneReferences.sceneId, scene.id));
+// Roda dentro da transação do chamador: attempt, job e invalidação da aprovação vão juntos ou nenhum vai.
+async function createAttempt(tx: DbOrTx, scene: Scene, mode: "ugc" | "novelinha", promptOverride?: string) {
+  const links = await tx.select().from(sceneReferences).where(eq(sceneReferences.sceneId, scene.id));
   const prompt = promptOverride?.trim() || buildScenePrompt(mode, scene);
-  const [attempt] = await db
+  const [attempt] = await tx
     .insert(sceneAttempts)
     .values({ sceneId: scene.id, prompt, referenceAssetIds: links.map((l) => l.assetId) })
     .returning();
-  await enqueue(db, "generate_scene", { attemptId: attempt!.id });
+  await enqueue(tx, "generate_scene", { attemptId: attempt!.id });
   // O clipe aprovado anterior deixa de valer: o usuário precisa aprovar a nova versão (ou restaurar a antiga).
-  await db.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, scene.id));
+  await tx.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, scene.id));
   return attempt!;
 }
 
-export async function generateAllScenes(deps: Deps, projectId: string): Promise<void> {
-  const { db } = deps;
-  const project = await getProject(db, projectId);
-  if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
-  const list = await db.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
-  if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
-  await setStage(db, projectId, "generating");
-  for (const scene of list) await createAttempt(deps, scene, project.mode);
+// Trava a linha da cena até o fim da transação: serializa chamadas concorrentes sobre a mesma cena.
+async function lockScene(tx: DbOrTx, sceneId: string): Promise<Scene> {
+  const [row] = await tx.select().from(scenes).where(eq(scenes.id, sceneId)).for("update");
+  if (!row) throw new DomainError("Cena não encontrada", 404);
+  return row;
 }
 
-async function hasPendingAttempt(db: Db, sceneId: string): Promise<boolean> {
+export async function generateAllScenes(deps: Deps, projectId: string): Promise<void> {
+  await deps.db.transaction(async (tx) => {
+    const project = await getProject(tx, projectId);
+    if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
+    const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
+    if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
+    // Compare-and-set da etapa: a segunda chamada concorrente espera o commit e falha aqui.
+    await setStage(tx, projectId, "generating");
+    for (const scene of list) await createAttempt(tx, scene, project.mode);
+  });
+}
+
+async function hasPendingAttempt(db: DbOrTx, sceneId: string): Promise<boolean> {
   const rows = await db
     .select({ id: sceneAttempts.id })
     .from(sceneAttempts)
@@ -136,23 +145,32 @@ async function hasPendingAttempt(db: Db, sceneId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+// Chamada concorrente na mesma cena: a segunda espera o lock, vê a tentativa pendente e é rejeitada.
 export async function regenerateScene(deps: Deps, sceneId: string, promptOverride?: string) {
-  const { db } = deps;
-  const scene = await getScene(db, sceneId);
-  const project = await getProject(db, scene.projectId);
-  if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
-  if (await hasPendingAttempt(db, sceneId)) throw new DomainError("Já há uma geração em andamento nesta cena");
-  return createAttempt(deps, scene, project.mode, promptOverride);
+  return deps.db.transaction(async (tx) => {
+    const scene = await lockScene(tx, sceneId);
+    const project = await getProject(tx, scene.projectId);
+    if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
+    if (await hasPendingAttempt(tx, sceneId)) throw new DomainError("Já há uma geração em andamento nesta cena");
+    return createAttempt(tx, scene, project.mode, promptOverride);
+  });
 }
 
+// Locks em ordem de posição (sem deadlock); cenas já em geração são puladas, então a chamada concorrente vira no-op.
 export async function regenerateAllScenes(deps: Deps, projectId: string): Promise<void> {
-  const { db } = deps;
-  const project = await getProject(db, projectId);
-  if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
-  const list = await db.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
-  for (const scene of list) {
-    if (!(await hasPendingAttempt(db, scene.id))) await createAttempt(deps, scene, project.mode);
-  }
+  await deps.db.transaction(async (tx) => {
+    const project = await getProject(tx, projectId);
+    if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
+    const list = await tx
+      .select()
+      .from(scenes)
+      .where(eq(scenes.projectId, projectId))
+      .orderBy(asc(scenes.position))
+      .for("update");
+    for (const scene of list) {
+      if (!(await hasPendingAttempt(tx, scene.id))) await createAttempt(tx, scene, project.mode);
+    }
+  });
 }
 
 export async function approveAttempt(db: Db, sceneId: string, attemptId: string): Promise<Scene> {
@@ -168,12 +186,15 @@ export async function approveAttempt(db: Db, sceneId: string, attemptId: string)
 }
 
 export async function startAssembly(db: Db, projectId: string): Promise<void> {
-  const project = await getProject(db, projectId);
-  if (project.stage !== "review") throw new DomainError("A montagem só começa na etapa de revisão");
-  const list = await db.select().from(scenes).where(eq(scenes.projectId, projectId));
-  if (list.length === 0 || list.some((s) => !s.approvedAttemptId)) {
-    throw new DomainError("Aprove todas as cenas antes de montar o vídeo");
-  }
-  await setStage(db, projectId, "assembling");
-  await enqueue(db, "assemble", { projectId });
+  await db.transaction(async (tx) => {
+    const project = await getProject(tx, projectId);
+    if (project.stage !== "review") throw new DomainError("A montagem só começa na etapa de revisão");
+    const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId));
+    if (list.length === 0 || list.some((s) => !s.approvedAttemptId)) {
+      throw new DomainError("Aprove todas as cenas antes de montar o vídeo");
+    }
+    // Etapa e job na mesma transação: se o enqueue falha, o projeto volta para review.
+    await setStage(tx, projectId, "assembling");
+    await enqueue(tx, "assemble", { projectId });
+  });
 }

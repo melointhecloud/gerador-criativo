@@ -1,12 +1,12 @@
 import { and, eq, gte, lt, lte } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { Db, DbOrTx } from "@/db/client";
 import { jobs } from "@/db/schema";
 
 export type JobType = "generate_character" | "generate_scene" | "assemble";
 export type Job = typeof jobs.$inferSelect;
 
 export async function enqueue(
-  db: Db,
+  db: DbOrTx,
   type: JobType,
   payload: Record<string, unknown>,
   opts: { runAt?: Date; maxAttempts?: number } = {},

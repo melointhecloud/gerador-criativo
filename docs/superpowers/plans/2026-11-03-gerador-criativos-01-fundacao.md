@@ -742,6 +742,9 @@ export function createDb(url: string, max = 10) {
 }
 
 export type Db = ReturnType<typeof createDb>["db"];
+// Handle de transação; funções que precisam participar de uma transação do chamador aceitam DbOrTx.
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type DbOrTx = Db | Tx;
 ```
 
 `src/db/migrate.ts`:
@@ -1501,14 +1504,14 @@ Expected: FAIL — módulo não encontrado.
 
 ```ts
 import { and, eq, gte, lt, lte } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { Db, DbOrTx } from "@/db/client";
 import { jobs } from "@/db/schema";
 
 export type JobType = "generate_character" | "generate_scene" | "assemble";
 export type Job = typeof jobs.$inferSelect;
 
 export async function enqueue(
-  db: Db,
+  db: DbOrTx,
   type: JobType,
   payload: Record<string, unknown>,
   opts: { runAt?: Date; maxAttempts?: number } = {},

@@ -977,7 +977,7 @@ Expected: FAIL — `@/services/projects` não encontrado.
 ```ts
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { Db, DbOrTx } from "@/db/client";
 import {
   assets, characters, projects, sceneAttempts, sceneReferences, scenes,
 } from "@/db/schema";
@@ -1014,7 +1014,7 @@ export async function listProjects(db: Db): Promise<Project[]> {
   return db.select().from(projects).orderBy(desc(projects.updatedAt));
 }
 
-export async function getProject(db: Db, id: string): Promise<Project> {
+export async function getProject(db: DbOrTx, id: string): Promise<Project> {
   const [row] = await db.select().from(projects).where(eq(projects.id, id));
   if (!row) throw new DomainError("Projeto não encontrado", 404);
   return row;
@@ -1064,7 +1064,7 @@ export async function removeReference(db: Db, assetId: string): Promise<void> {
   await db.delete(assets).where(eq(assets.id, assetId));
 }
 
-async function assertCanEnter(db: Db, project: Project, target: Stage): Promise<void> {
+async function assertCanEnter(db: DbOrTx, project: Project, target: Stage): Promise<void> {
   const order = stagesFor(project.mode);
   if (order.indexOf(target) <= order.indexOf(project.stage)) return; // voltar não tem pré-condição
 
@@ -1086,7 +1086,9 @@ async function assertCanEnter(db: Db, project: Project, target: Stage): Promise<
   }
 }
 
-export async function setStage(db: Db, projectId: string, target: Stage): Promise<Project> {
+// A troca é condicional à etapa lida (compare-and-set): duas chamadas concorrentes não passam juntas.
+// Dentro de uma transação, o UPDATE também segura o lock da linha do projeto até o commit.
+export async function setStage(db: DbOrTx, projectId: string, target: Stage): Promise<Project> {
   const project = await getProject(db, projectId);
   if (!canTransition(project.mode, project.stage, target)) {
     throw new DomainError(`Não é possível ir de "${project.stage}" para "${target}"`);
@@ -1095,9 +1097,10 @@ export async function setStage(db: Db, projectId: string, target: Stage): Promis
   const [row] = await db
     .update(projects)
     .set({ stage: target, updatedAt: new Date() })
-    .where(eq(projects.id, projectId))
+    .where(and(eq(projects.id, projectId), eq(projects.stage, project.stage)))
     .returning();
-  return row!;
+  if (!row) throw new DomainError("O projeto mudou de etapa; atualize a página e tente de novo");
+  return row;
 }
 
 // Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
@@ -1170,9 +1173,10 @@ git commit -m "feat(services): project service with stage guards, references and
 
 `tests/services/scenes.test.ts`:
 ```ts
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { jobs, projects, sceneAttempts, scenes } from "@/db/schema";
+import { jobs, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
+import { enqueue } from "@/queue/queue";
 import {
   approveAttempt, generateAllScenes, planProjectScript, regenerateAllScenes, regenerateScene,
   startAssembly, totalSeconds, updateScene,
@@ -1181,6 +1185,12 @@ import { getSnapshot } from "@/services/projects";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
 import { seedAsset, seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
+
+// enqueue delega ao real; os testes de atomicidade fazem a próxima chamada falhar (mockRejectedValueOnce).
+vi.mock("@/queue/queue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/queue/queue")>();
+  return { ...actual, enqueue: vi.fn(actual.enqueue) };
+});
 
 beforeEach(resetDb);
 let cleanup: () => Promise<void>;
@@ -1230,6 +1240,22 @@ describe("planProjectScript", () => {
     expect(m.text.calls[1]!.prompt).toContain("Close no produto");
   });
 
+  it("persiste o aviso e limita as referências quando o roteiro cita imagens demais", async () => {
+    const labels = ["a", "b", "c", "d", "e"]; // maxSceneReferences = 3
+    const m = await makeDeps({ text: [draft(labels)] });
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { mode: "ugc", stage: "script" });
+    for (const l of labels) await seedAsset(db, p.id, { kind: "reference", label: l });
+    await planProjectScript(m.deps, p.id);
+    const rows = await db.select().from(scenes).where(eq(scenes.projectId, p.id));
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.notice).toBeTruthy();
+      const links = await db.select().from(sceneReferences).where(eq(sceneReferences.sceneId, row.id));
+      expect(links).toHaveLength(3);
+    }
+  });
+
   it("só funciona na etapa de roteiro", async () => {
     const m = await makeDeps({ text: [draft()] });
     cleanup = m.cleanup;
@@ -1275,6 +1301,31 @@ describe("generateAllScenes", () => {
     const queued = await db.select().from(jobs);
     expect(queued).toHaveLength(2);
     expect(queued.every((j) => j.type === "generate_scene")).toBe(true);
+  });
+
+  it("chamadas concorrentes criam uma única tentativa e um único job por cena", async () => {
+    const { m, p } = await projectWithScript();
+    const results = await Promise.allSettled([generateAllScenes(m.deps, p.id), generateAllScenes(m.deps, p.id)]);
+    // Comportamento escolhido: a segunda chamada é rejeitada com erro em português (não é no-op).
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason.message)).toMatch(/etapa/);
+    const attempts = await db.select().from(sceneAttempts);
+    expect(attempts).toHaveLength(2);
+    expect(new Set(attempts.map((a) => a.sceneId)).size).toBe(2);
+    expect(await db.select().from(jobs)).toHaveLength(2);
+  });
+
+  it("se o enqueue falha no meio, nada é gravado e o projeto continua em roteiro", async () => {
+    const { m, p } = await projectWithScript();
+    const real = await vi.importActual<typeof import("@/queue/queue")>("@/queue/queue");
+    vi.mocked(enqueue)
+      .mockImplementationOnce(real.enqueue)
+      .mockRejectedValueOnce(new Error("fila indisponível"));
+    await expect(generateAllScenes(m.deps, p.id)).rejects.toThrow(/fila indisponível/);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("script");
+    expect(await db.select().from(sceneAttempts)).toHaveLength(0);
+    expect(await db.select().from(jobs)).toHaveLength(0);
   });
 
   it("exige ao menos uma cena", async () => {
@@ -1323,6 +1374,38 @@ describe("regenerateScene / regenerateAllScenes", () => {
     const { m, s0 } = await inReview();
     await regenerateScene(m.deps, s0.id);
     await expect(regenerateScene(m.deps, s0.id)).rejects.toThrow(/andamento/);
+  });
+
+  it("chamadas concorrentes na mesma cena criam uma só tentativa e um só job", async () => {
+    const { m, s0 } = await inReview();
+    // Comportamento escolhido: a segunda chamada é rejeitada com "geração em andamento".
+    const results = await Promise.allSettled([regenerateScene(m.deps, s0.id), regenerateScene(m.deps, s0.id)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason.message)).toMatch(/andamento/);
+    const attempts = await db.select().from(sceneAttempts).where(eq(sceneAttempts.sceneId, s0.id));
+    expect(attempts.filter((a) => a.status === "queued")).toHaveLength(1);
+    expect(await db.select().from(jobs)).toHaveLength(1);
+  });
+
+  it("regenerar todas concorrente não duplica tentativas", async () => {
+    const { m, p } = await inReview();
+    await Promise.all([regenerateAllScenes(m.deps, p.id), regenerateAllScenes(m.deps, p.id)]);
+    expect(await db.select().from(sceneAttempts).where(eq(sceneAttempts.status, "queued"))).toHaveLength(2);
+    expect(await db.select().from(jobs)).toHaveLength(2);
+  });
+
+  it("se o enqueue falha, não sobra tentativa órfã nem se perde a aprovação", async () => {
+    const { m, s0, a0 } = await inReview();
+    vi.mocked(enqueue).mockRejectedValueOnce(new Error("fila indisponível"));
+    await expect(regenerateScene(m.deps, s0.id)).rejects.toThrow(/fila indisponível/);
+    const attempts = await db.select().from(sceneAttempts).where(eq(sceneAttempts.sceneId, s0.id));
+    expect(attempts.map((a) => a.id)).toEqual([a0.id]);
+    const [scene] = await db.select().from(scenes).where(eq(scenes.id, s0.id));
+    expect(scene!.approvedAttemptId).toBe(a0.id);
+    expect(await db.select().from(jobs)).toHaveLength(0);
+    await regenerateScene(m.deps, s0.id); // a cena não ficou bloqueada
+    expect(await db.select().from(jobs)).toHaveLength(1);
   });
 
   it("regenerar todas cria uma tentativa por cena", async () => {
@@ -1381,6 +1464,27 @@ describe("startAssembly", () => {
     expect(queued[0]!.type).toBe("assemble");
     expect(queued[0]!.payload).toEqual({ projectId: p.id });
   });
+
+  it("se o enqueue falha, o projeto não fica preso em assembling", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const s = await seedScene(db, p.id, 0);
+    const a = await seedAttempt(db, s.id, { status: "done" });
+    await db.update(scenes).set({ approvedAttemptId: a.id }).where(eq(scenes.id, s.id));
+    vi.mocked(enqueue).mockRejectedValueOnce(new Error("fila indisponível"));
+    await expect(startAssembly(db, p.id)).rejects.toThrow(/fila indisponível/);
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+    expect(await db.select().from(jobs)).toHaveLength(0);
+  });
+
+  it("chamadas concorrentes enfileiram uma única montagem", async () => {
+    const p = await seedProject(db, { stage: "review" });
+    const s = await seedScene(db, p.id, 0);
+    const a = await seedAttempt(db, s.id, { status: "done" });
+    await db.update(scenes).set({ approvedAttemptId: a.id }).where(eq(scenes.id, s.id));
+    const results = await Promise.allSettled([startAssembly(db, p.id), startAssembly(db, p.id)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await db.select().from(jobs)).toHaveLength(1);
+  });
 });
 ```
 
@@ -1391,9 +1495,11 @@ Expected: FAIL — `@/services/scenes` não encontrado.
 
 - [ ] **Step 3: Implementar `src/services/scenes.ts`**
 
+Atomicidade e concorrência: cada operação pública roda em `db.transaction`, com `enqueue` e `setStage` na MESMA transação (aceitam `DbOrTx`, ver Plano 1 `src/db/client.ts`). `regenerateScene`/`regenerateAllScenes` travam a linha da cena (`SELECT ... FOR UPDATE`) e reconferem "tentativa pendente"; `setStage` é compare-and-set sobre a etapa lida. Uma segunda chamada concorrente de `regenerateScene`, `generateAllScenes` ou `startAssembly` é **rejeitada** com `DomainError` em pt-BR; `regenerateAllScenes` concorrente vira no-op (pula cenas já em geração). Os testes de falha de fila usam `vi.mock("@/queue/queue")` com `enqueue` delegando ao real e `mockRejectedValueOnce`.
+
 ```ts
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { Db, DbOrTx } from "@/db/client";
 import { assets, characters, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { buildScenePrompt } from "@/modules/prompt";
@@ -1497,31 +1603,40 @@ export async function updateScene(
   return row!;
 }
 
-async function createAttempt(deps: Deps, scene: Scene, mode: "ugc" | "novelinha", promptOverride?: string) {
-  const { db } = deps;
-  const links = await db.select().from(sceneReferences).where(eq(sceneReferences.sceneId, scene.id));
+// Roda dentro da transação do chamador: attempt, job e invalidação da aprovação vão juntos ou nenhum vai.
+async function createAttempt(tx: DbOrTx, scene: Scene, mode: "ugc" | "novelinha", promptOverride?: string) {
+  const links = await tx.select().from(sceneReferences).where(eq(sceneReferences.sceneId, scene.id));
   const prompt = promptOverride?.trim() || buildScenePrompt(mode, scene);
-  const [attempt] = await db
+  const [attempt] = await tx
     .insert(sceneAttempts)
     .values({ sceneId: scene.id, prompt, referenceAssetIds: links.map((l) => l.assetId) })
     .returning();
-  await enqueue(db, "generate_scene", { attemptId: attempt!.id });
+  await enqueue(tx, "generate_scene", { attemptId: attempt!.id });
   // O clipe aprovado anterior deixa de valer: o usuário precisa aprovar a nova versão (ou restaurar a antiga).
-  await db.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, scene.id));
+  await tx.update(scenes).set({ approvedAttemptId: null }).where(eq(scenes.id, scene.id));
   return attempt!;
 }
 
-export async function generateAllScenes(deps: Deps, projectId: string): Promise<void> {
-  const { db } = deps;
-  const project = await getProject(db, projectId);
-  if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
-  const list = await db.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
-  if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
-  await setStage(db, projectId, "generating");
-  for (const scene of list) await createAttempt(deps, scene, project.mode);
+// Trava a linha da cena até o fim da transação: serializa chamadas concorrentes sobre a mesma cena.
+async function lockScene(tx: DbOrTx, sceneId: string): Promise<Scene> {
+  const [row] = await tx.select().from(scenes).where(eq(scenes.id, sceneId)).for("update");
+  if (!row) throw new DomainError("Cena não encontrada", 404);
+  return row;
 }
 
-async function hasPendingAttempt(db: Db, sceneId: string): Promise<boolean> {
+export async function generateAllScenes(deps: Deps, projectId: string): Promise<void> {
+  await deps.db.transaction(async (tx) => {
+    const project = await getProject(tx, projectId);
+    if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
+    const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
+    if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
+    // Compare-and-set da etapa: a segunda chamada concorrente espera o commit e falha aqui.
+    await setStage(tx, projectId, "generating");
+    for (const scene of list) await createAttempt(tx, scene, project.mode);
+  });
+}
+
+async function hasPendingAttempt(db: DbOrTx, sceneId: string): Promise<boolean> {
   const rows = await db
     .select({ id: sceneAttempts.id })
     .from(sceneAttempts)
@@ -1530,23 +1645,32 @@ async function hasPendingAttempt(db: Db, sceneId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+// Chamada concorrente na mesma cena: a segunda espera o lock, vê a tentativa pendente e é rejeitada.
 export async function regenerateScene(deps: Deps, sceneId: string, promptOverride?: string) {
-  const { db } = deps;
-  const scene = await getScene(db, sceneId);
-  const project = await getProject(db, scene.projectId);
-  if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
-  if (await hasPendingAttempt(db, sceneId)) throw new DomainError("Já há uma geração em andamento nesta cena");
-  return createAttempt(deps, scene, project.mode, promptOverride);
+  return deps.db.transaction(async (tx) => {
+    const scene = await lockScene(tx, sceneId);
+    const project = await getProject(tx, scene.projectId);
+    if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
+    if (await hasPendingAttempt(tx, sceneId)) throw new DomainError("Já há uma geração em andamento nesta cena");
+    return createAttempt(tx, scene, project.mode, promptOverride);
+  });
 }
 
+// Locks em ordem de posição (sem deadlock); cenas já em geração são puladas, então a chamada concorrente vira no-op.
 export async function regenerateAllScenes(deps: Deps, projectId: string): Promise<void> {
-  const { db } = deps;
-  const project = await getProject(db, projectId);
-  if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
-  const list = await db.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
-  for (const scene of list) {
-    if (!(await hasPendingAttempt(db, scene.id))) await createAttempt(deps, scene, project.mode);
-  }
+  await deps.db.transaction(async (tx) => {
+    const project = await getProject(tx, projectId);
+    if (project.stage !== "review") throw new DomainError("Só é possível regerar cenas na etapa de revisão");
+    const list = await tx
+      .select()
+      .from(scenes)
+      .where(eq(scenes.projectId, projectId))
+      .orderBy(asc(scenes.position))
+      .for("update");
+    for (const scene of list) {
+      if (!(await hasPendingAttempt(tx, scene.id))) await createAttempt(tx, scene, project.mode);
+    }
+  });
 }
 
 export async function approveAttempt(db: Db, sceneId: string, attemptId: string): Promise<Scene> {
@@ -1562,14 +1686,17 @@ export async function approveAttempt(db: Db, sceneId: string, attemptId: string)
 }
 
 export async function startAssembly(db: Db, projectId: string): Promise<void> {
-  const project = await getProject(db, projectId);
-  if (project.stage !== "review") throw new DomainError("A montagem só começa na etapa de revisão");
-  const list = await db.select().from(scenes).where(eq(scenes.projectId, projectId));
-  if (list.length === 0 || list.some((s) => !s.approvedAttemptId)) {
-    throw new DomainError("Aprove todas as cenas antes de montar o vídeo");
-  }
-  await setStage(db, projectId, "assembling");
-  await enqueue(db, "assemble", { projectId });
+  await db.transaction(async (tx) => {
+    const project = await getProject(tx, projectId);
+    if (project.stage !== "review") throw new DomainError("A montagem só começa na etapa de revisão");
+    const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId));
+    if (list.length === 0 || list.some((s) => !s.approvedAttemptId)) {
+      throw new DomainError("Aprove todas as cenas antes de montar o vídeo");
+    }
+    // Etapa e job na mesma transação: se o enqueue falha, o projeto volta para review.
+    await setStage(tx, projectId, "assembling");
+    await enqueue(tx, "assemble", { projectId });
+  });
 }
 ```
 
