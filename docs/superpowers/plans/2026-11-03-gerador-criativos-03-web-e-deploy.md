@@ -202,7 +202,7 @@ git commit -m "feat(auth): signed session cookie and password check"
 **Files:**
 - Create: `src/web/context.ts`, `src/web/http.ts`, `src/web/range.ts`
 - Modify: `src/services/projects.ts` (acrescentar `getAsset`)
-- Test: `tests/web/range.test.ts`
+- Test: `tests/web/range.test.ts`, `tests/web/http.test.ts`, `tests/web/context.test.ts`
 
 - [ ] **Step 1: Escrever os testes do parser de Range**
 
@@ -233,6 +233,171 @@ describe("parseRange", () => {
     expect(parseRange("bytes=-", 100)).toBe("invalid");
     expect(parseRange("bytes=-0", 100)).toBe("invalid");
   });
+  it("múltiplos intervalos, lixo e números gigantes são inválidos (nunca NaN/negativo)", () => {
+    expect(parseRange("bytes=0-1,5-6", 100)).toBe("invalid");
+    expect(parseRange("bytes=a-b", 100)).toBe("invalid");
+    expect(parseRange("bytes=-5-9", 100)).toBe("invalid");
+    expect(parseRange("bytes=99999999999999999999999-", 100)).toBe("invalid");
+    expect(parseRange("bytes=0-99999999999999999999999", 100)).toEqual({ start: 0, end: 99 });
+    expect(parseRange("bytes=-99999999999999999999999", 100)).toEqual({ start: 0, end: 99 });
+  });
+  it("arquivo vazio: qualquer Range é inválido", () => {
+    expect(parseRange("bytes=0-", 0)).toBe("invalid");
+    expect(parseRange("bytes=-5", 0)).toBe("invalid");
+  });
+});
+```
+
+
+- [ ] **Step 1b: Testes do wrapper `api()` e do contexto**
+
+`tests/web/http.test.ts` e `tests/web/context.test.ts` (cobrem: 401 fail-closed sem rodar o handler, contexto indisponível = 500 e handler não roda, Zod em pt-BR, id malformado, JSON inválido, 500 genérico sem vazar mensagem, `auth:false`, e rejeição do contexto não ficar em cache):
+
+```ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { createSession, SESSION_COOKIE } from "@/auth/session";
+import type { WebContext } from "@/web/context";
+import { setContextForTests } from "@/web/context";
+import { api } from "@/web/http";
+import { DomainError } from "@/services/errors";
+
+const SECRET = "s".repeat(40);
+const ctx = { env: { SESSION_SECRET: SECRET }, deps: {} } as unknown as WebContext;
+
+async function authed(url = "http://x/api/t", init: RequestInit = {}) {
+  const token = await createSession(SECRET);
+  return new Request(url, { ...init, headers: { cookie: `${SESSION_COOKIE}=${token}`, ...(init.headers ?? {}) } });
+}
+const ID = "00000000-0000-0000-0000-000000000000";
+
+afterEach(() => {
+  setContextForTests(null);
+  vi.restoreAllMocks();
+});
+
+describe("api()", () => {
+  it("sem cookie, com cookie inválido ou segredo vazio: 401 e o handler não roda", async () => {
+    const handler = vi.fn(async () => ({ ok: 1 }));
+    setContextForTests(ctx);
+    const route = api(handler);
+    expect((await route(new Request("http://x/"))).status).toBe(401);
+    expect((await route(new Request("http://x/", { headers: { cookie: `${SESSION_COOKIE}=lixo` } }))).status).toBe(401);
+    setContextForTests({ ...ctx, env: { SESSION_SECRET: "" } } as unknown as WebContext);
+    expect((await route(await authed())).status).toBe(401);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("falha fechado quando o contexto não carrega (500, handler não roda, sem vazar detalhes)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("DATABASE_URL", "");
+    setContextForTests(null);
+    const handler = vi.fn(async () => ({ ok: 1 }));
+    const res = await api(handler)(await authed());
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Erro interno do servidor. Tente novamente." });
+    expect(handler).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it("autenticado: roda o handler, devolve JSON e não deixa cachear", async () => {
+    setContextForTests(ctx);
+    const res = await api(async ({ params }) => ({ id: params.id }))(await authed(), { params: Promise.resolve({ id: ID }) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: ID });
+    expect(res.headers.get("cache-control")).toContain("no-store");
+  });
+
+  it("id malformado na URL: 400 em pt-BR", async () => {
+    setContextForTests(ctx);
+    const res = await api(async () => ({}))(await authed(), { params: Promise.resolve({ id: "x" }) });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Identificador inválido");
+  });
+
+  it("DomainError vira status + mensagem", async () => {
+    setContextForTests(ctx);
+    const res = await api(async () => {
+      throw new DomainError("Projeto não encontrado", 404);
+    })(await authed());
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Projeto não encontrado" });
+  });
+
+  it("ZodError vira 400 com resumo em pt-BR (sem JSON cru do Zod)", async () => {
+    setContextForTests(ctx);
+    const schema = z.object({ name: z.string().min(1), n: z.number() });
+    const res = await api(async () => {
+      schema.parse({ name: "", n: "a" });
+    })(await authed());
+    expect(res.status).toBe(400);
+    const { error } = await res.json();
+    expect(error).toContain("name");
+    expect(error).toContain("n");
+    expect(error).not.toMatch(/Invalid|expected|Too small/i);
+    const missing = await api(async () => {
+      schema.parse({});
+    })(await authed());
+    expect((await missing.json()).error).toContain("obrigatório");
+  });
+
+  it("JSON malformado no corpo: 400", async () => {
+    setContextForTests(ctx);
+    const res = await api(async ({ req }) => req.json())(await authed("http://x/", { method: "POST", body: "{nope" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("erro desconhecido: 500 genérico, loga no servidor, sem vazar mensagem", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setContextForTests(ctx);
+    const res = await api(async () => {
+      throw new Error("senha do banco: hunter2");
+    })(await authed());
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(await res.json())).not.toContain("hunter2");
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it("auth:false é o único jeito de pular a sessão", async () => {
+    setContextForTests(ctx);
+    const res = await api(async () => ({ ok: 1 }), { auth: false })(new Request("http://x/"));
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+```ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const createProviders = vi.fn();
+vi.mock("@/providers", () => ({ createProviders: (...a: unknown[]) => createProviders(...a) }));
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  delete (globalThis as { __gcContext?: unknown }).__gcContext;
+  createProviders.mockReset();
+});
+
+function stubEnv() {
+  vi.stubEnv("DATABASE_URL", "postgres://u:p@localhost:5434/x");
+  vi.stubEnv("PROVIDER", "fake");
+  vi.stubEnv("ACCESS_PASSWORD", "pw");
+  vi.stubEnv("SESSION_SECRET", "s".repeat(40));
+}
+
+describe("getContext", () => {
+  it("não deixa a rejeição em cache: a próxima chamada tenta de novo", async () => {
+    stubEnv();
+    const { getContext } = await import("@/web/context");
+    createProviders.mockRejectedValueOnce(new Error("ffmpeg ausente")).mockResolvedValueOnce({});
+    await expect(getContext()).rejects.toThrow("ffmpeg ausente");
+    const ok = await getContext();
+    expect(ok.env.PROVIDER).toBe("fake");
+    expect(createProviders).toHaveBeenCalledTimes(2);
+    expect(await getContext()).toBe(ok); // sucesso fica em cache
+    expect(createProviders).toHaveBeenCalledTimes(2);
+  });
 });
 ```
 
@@ -247,12 +412,15 @@ Expected: FAIL — módulo não encontrado.
 export type ByteRange = { start: number; end: number };
 
 // null = sem Range (corpo inteiro); "invalid" = 416.
+// Multi-range ("bytes=0-1,5-6"), formato desconhecido, início fora do arquivo e arquivo vazio são "invalid".
+// Nunca devolve NaN, valor negativo ou fim além de size-1.
 export function parseRange(header: string | null, size: number): ByteRange | null | "invalid" {
   if (!header) return null;
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!m) return "invalid";
   const [, s, e] = m as unknown as [string, string, string];
   if (s === "" && e === "") return "invalid";
+  if (size <= 0) return "invalid";
 
   let start: number;
   let end: number;
@@ -265,7 +433,7 @@ export function parseRange(header: string | null, size: number): ByteRange | nul
     start = Number(s);
     end = e === "" ? size - 1 : Math.min(Number(e), size - 1);
   }
-  if (start > end || start >= size) return "invalid";
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return "invalid";
   return { start, end };
 }
 ```
@@ -284,20 +452,31 @@ export type WebContext = { env: Env; deps: Deps };
 const g = globalThis as unknown as { __gcContext?: Promise<WebContext> };
 let override: WebContext | null = null;
 
+async function createContext(): Promise<WebContext> {
+  const env = loadEnv();
+  // Providers antes do pool: se falharem (ex.: ffmpeg ausente com PROVIDER=fake), nenhum pool fica vazando.
+  const providers = await createProviders(env);
+  const { db } = createDb(env.DATABASE_URL, 10);
+  const deps: Deps = {
+    db,
+    storage: createStorage(env),
+    providers,
+    config: { maxSceneReferences: env.MAX_SCENE_REFERENCES, sceneMaxSeconds: env.SCENE_MAX_SECONDS },
+  };
+  return { env, deps };
+}
+
 // Reaproveitado entre requests e entre recarregamentos do dev server.
+// Uma falha NÃO fica em cache: a próxima request tenta de novo.
 export function getContext(): Promise<WebContext> {
   if (override) return Promise.resolve(override);
-  g.__gcContext ??= (async () => {
-    const env = loadEnv();
-    const { db } = createDb(env.DATABASE_URL, 10);
-    const deps: Deps = {
-      db,
-      storage: createStorage(env),
-      providers: await createProviders(env),
-      config: { maxSceneReferences: env.MAX_SCENE_REFERENCES, sceneMaxSeconds: env.SCENE_MAX_SECONDS },
-    };
-    return { env, deps };
-  })();
+  if (!g.__gcContext) {
+    const p = createContext();
+    g.__gcContext = p;
+    p.catch(() => {
+      if (g.__gcContext === p) delete g.__gcContext;
+    });
+  }
   return g.__gcContext;
 }
 
@@ -316,6 +495,13 @@ import type { Deps } from "@/deps";
 import { DomainError } from "@/services/errors";
 import { getContext } from "./context";
 
+// Cabeçalhos de toda resposta com arquivo do usuário (rotas de arquivo da Task 3): nunca cache público, sem sniffing.
+export const FILE_HEADERS = {
+  "Cache-Control": "private, max-age=3600",
+  "X-Content-Type-Options": "nosniff",
+} as const;
+const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
+
 export function readCookie(header: string | null, name: string): string | undefined {
   if (!header) return undefined;
   for (const part of header.split(";")) {
@@ -325,9 +511,14 @@ export function readCookie(header: string | null, name: string): string | undefi
   return undefined;
 }
 
+// Falha fechado: qualquer erro (cookie ausente, segredo vazio, contexto indisponível) conta como não autenticado.
 export async function isAuthedCookie(cookieHeader: string | null): Promise<boolean> {
-  const { env } = await getContext();
-  return verifySession(readCookie(cookieHeader, SESSION_COOKIE), env.SESSION_SECRET);
+  try {
+    const { env } = await getContext();
+    return await verifySession(readCookie(cookieHeader, SESSION_COOKIE), env.SESSION_SECRET);
+  } catch {
+    return false;
+  }
 }
 
 type ApiArgs = { req: Request; params: Record<string, string>; deps: Deps; env: Env };
@@ -335,27 +526,82 @@ type RouteCtx = { params: Promise<Record<string, string>> };
 
 const uuid = z.guid(); // qualquer id no formato 8-4-4-4-12; evita que um id malformado chegue ao Postgres
 
-// Envolve um endpoint: autentica, valida ids da URL, converte erros de domínio e de validação em JSON.
+const json = (body: unknown, status = 200) => Response.json(body, { status, headers: JSON_HEADERS });
+
+// Resumo em pt-BR (as mensagens nativas do Zod são em inglês).
+export function describeZodError(e: z.ZodError): string {
+  const parts = e.issues.slice(0, 5).map((i) => {
+    const field = i.path.length ? i.path.join(".") : "corpo da requisição";
+    let why: string;
+    switch (i.code) {
+      case "invalid_type":
+        why = i.input === undefined ? "campo obrigatório" : "tipo inválido";
+        break;
+      case "too_small":
+        why = "valor curto ou pequeno demais";
+        break;
+      case "too_big":
+        why = "valor longo ou grande demais";
+        break;
+      case "invalid_value":
+        why = "valor não permitido";
+        break;
+      case "invalid_format":
+        why = "formato inválido";
+        break;
+      case "unrecognized_keys":
+        why = "campo não reconhecido";
+        break;
+      default:
+        why = "valor inválido";
+    }
+    return `${field}: ${why}`;
+  });
+  return `Dados inválidos (${parts.join("; ")})`;
+}
+
+// Envolve um endpoint: autentica (fail closed), valida ids da URL, converte erros em JSON pt-BR.
+// `auth: false` existe só para a rota de login; toda outra rota exige a sessão.
 export function api(handler: (a: ApiArgs) => Promise<unknown>, opts: { auth?: boolean } = {}) {
   return async (req: Request, ctx?: RouteCtx): Promise<Response> => {
+    // Falha ao montar o contexto (env inválido, ffmpeg ausente...) é erro de servidor, nunca "dados inválidos"
+    // (um ZodError do loadEnv não pode virar 400 nem vazar nomes de variáveis).
+    let context: Awaited<ReturnType<typeof getContext>>;
     try {
-      const { deps, env } = await getContext();
-      if (opts.auth !== false && !(await isAuthedCookie(req.headers.get("cookie")))) {
-        return Response.json({ error: "Não autorizado" }, { status: 401 });
+      context = await getContext();
+    } catch (e) {
+      console.error("Falha ao montar o contexto da aplicação:", e instanceof Error ? e.message : "erro desconhecido");
+      return json({ error: "Erro interno do servidor. Tente novamente." }, 500);
+    }
+    const { deps, env } = context;
+    try {
+      if (opts.auth !== false) {
+        let ok = false;
+        try {
+          ok = await verifySession(readCookie(req.headers.get("cookie"), SESSION_COOKIE), env.SESSION_SECRET);
+        } catch {
+          ok = false;
+        }
+        if (!ok) return json({ error: "Não autorizado" }, 401);
       }
       const params = ctx?.params ? await ctx.params : {};
-      for (const v of Object.values(params)) uuid.parse(v);
+      for (const v of Object.values(params)) {
+        if (!uuid.safeParse(v).success) throw new DomainError("Identificador inválido", 400);
+      }
       const out = await handler({ req, params, deps, env });
-      return out instanceof Response ? out : Response.json(out ?? { ok: true });
+      return out instanceof Response ? out : json(out ?? { ok: true });
     } catch (e) {
-      if (e instanceof DomainError) return Response.json({ error: e.message }, { status: e.status });
-      if (e instanceof z.ZodError) return Response.json({ error: "Dados inválidos", details: e.issues }, { status: 400 });
+      if (e instanceof DomainError) return json({ error: e.message }, e.status);
+      if (e instanceof z.ZodError) return json({ error: describeZodError(e) }, 400);
+      if (e instanceof SyntaxError && /JSON/i.test(e.message)) return json({ error: "Corpo da requisição inválido" }, 400);
       console.error(e);
-      return Response.json({ error: "Erro interno" }, { status: 500 });
+      return json({ error: "Erro interno do servidor. Tente novamente." }, 500);
     }
   };
 }
 ```
+
+> Notas de execução (corrigidas após revisão): `api()` falha fechado (qualquer erro na verificação da sessão = 401; erro ao montar o contexto = 500 sem rodar o handler e sem mapear o ZodError do `loadEnv` para 400); `auth:false` é só para a rota de login; `getContext()` limpa o cache quando a criação rejeita (ex.: ffmpeg ausente com `PROVIDER=fake`); erros Zod viram resumo em pt-BR; `FILE_HEADERS` (`Cache-Control: private`, `nosniff`) deve ser usado nas respostas de arquivo da Task 3. A assinatura `api(async ({ req, params, deps, env }) => ...)` não mudou, então os snippets da Task 3 continuam válidos; `params` é `Promise` no Next 16, já tratado.
 
 - [ ] **Step 6: Acrescentar `getAsset` em `src/services/projects.ts`**
 
@@ -370,8 +616,8 @@ export async function getAsset(db: Db, id: string): Promise<Asset> {
 
 - [ ] **Step 7: Rodar testes e typecheck**
 
-Run: `pnpm vitest run tests/web/range.test.ts && pnpm typecheck`
-Expected: 5 testes PASS; typecheck limpo.
+Run: `pnpm vitest run tests/web && pnpm typecheck`
+Expected: todos PASS (range, http, context); typecheck limpo.
 
 - [ ] **Step 8: Commit**
 

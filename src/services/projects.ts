@@ -44,6 +44,12 @@ export async function getProject(db: DbOrTx, id: string): Promise<Project> {
   return row;
 }
 
+export async function getAsset(db: Db, id: string): Promise<Asset> {
+  const [row] = await db.select().from(assets).where(eq(assets.id, id));
+  if (!row) throw new DomainError("Arquivo não encontrado", 404);
+  return row;
+}
+
 export async function updateBriefing(db: Db, id: string, patch: { name?: string; copy?: string }): Promise<Project> {
   const project = await getProject(db, id);
   if (project.stage !== "briefing") throw new DomainError("A copy só pode ser editada na etapa de briefing");
