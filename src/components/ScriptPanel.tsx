@@ -53,7 +53,7 @@ function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "w
 }
 
 export function ScriptPanel({ snap, run, working }: PanelProps) {
-  const { project, scenes, estimatedSeconds } = snap;
+  const { project, scenes, estimatedSeconds, scenesToGenerate } = snap;
   const [feedback, setFeedback] = useState("");
   const hasScenes = scenes.length > 0;
 
@@ -91,16 +91,22 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
       {hasScenes && (
         <div className="card row" style={{ justifyContent: "space-between" }}>
           <span>
-            {scenes.length} cenas · {estimatedSeconds} s de vídeo a gerar
+            {scenesToGenerate === 0
+              ? `${scenes.length} cenas · todas já aprovadas`
+              : `${scenesToGenerate} de ${scenes.length} cenas a gerar · ${estimatedSeconds} s de vídeo`}
           </span>
           <button
             disabled={working}
             onClick={() => {
-              if (!confirm(`Serão geradas ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Continuar?`)) return;
+              const message =
+                scenesToGenerate === 0
+                  ? null
+                  : `Serão geradas ${scenesToGenerate} de ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Cenas já aprovadas serão mantidas. Continuar?`;
+              if (message && !confirm(message)) return;
               void run(() => api(`/api/projects/${project.id}/generate`, { method: "POST", body: {} }));
             }}
           >
-            Aprovar roteiro e gerar cenas
+            {scenesToGenerate === 0 ? "Ir para a revisão" : "Aprovar roteiro e gerar cenas"}
           </button>
         </div>
       )}

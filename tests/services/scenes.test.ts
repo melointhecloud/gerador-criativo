@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { jobs, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import { enqueue } from "@/queue/queue";
 import {
-  approveAttempt, generateAllScenes, planProjectScript, regenerateAllScenes, regenerateScene,
+  approveAttempt, generateAllScenes, generationPlan, planProjectScript, regenerateAllScenes, regenerateScene,
   startAssembly, totalSeconds, updateScene,
 } from "@/services/scenes";
 import { getSnapshot } from "@/services/projects";
@@ -181,6 +181,64 @@ describe("generateAllScenes", () => {
   it("totalSeconds soma a duração alvo das cenas", async () => {
     const { p } = await projectWithScript();
     expect(totalSeconds((await getSnapshot(db, p.id)).scenes)).toBe(11);
+  });
+});
+
+describe("generateAllScenes ao voltar para o roteiro (só gera cenas sem aprovação)", () => {
+  // Projeto em roteiro com 3 cenas (5 s cada), todas com clipe aprovado, como depois de voltar da revisão.
+  async function allApprovedBackInScript() {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { stage: "script" });
+    const list = [];
+    for (let i = 0; i < 3; i++) {
+      const s = await seedScene(db, p.id, i);
+      const a = await seedAttempt(db, s.id, { status: "done" });
+      await db.update(scenes).set({ approvedAttemptId: a.id }).where(eq(scenes.id, s.id));
+      list.push({ scene: s, attempt: a });
+    }
+    return { m, p, list };
+  }
+
+  it("com tudo aprovado, não cria tentativas nem jobs e vai direto para a revisão", async () => {
+    const { m, p } = await allApprovedBackInScript();
+    await generateAllScenes(m.deps, p.id);
+    expect((await getSnapshot(db, p.id)).project.stage).toBe("review");
+    expect(await db.select().from(sceneAttempts)).toHaveLength(3);
+    expect(await db.select().from(jobs)).toHaveLength(0);
+    expect((await db.select().from(scenes)).every((s) => s.approvedAttemptId)).toBe(true);
+  });
+
+  it("com tudo aprovado, duas chamadas concorrentes: só uma passa", async () => {
+    const { m, p } = await allApprovedBackInScript();
+    const results = await Promise.allSettled([generateAllScenes(m.deps, p.id), generateAllScenes(m.deps, p.id)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason.message)).toMatch(/etapa/);
+  });
+
+  it("depois de editar uma cena, só ela ganha tentativa e job; as outras mantêm a aprovação", async () => {
+    const { m, p, list } = await allApprovedBackInScript();
+    await updateScene(db, list[1]!.scene.id, { dialogue: "Fala nova" }, 8);
+    expect(generationPlan((await getSnapshot(db, p.id)).scenes)).toEqual({ scenesToGenerate: 1, estimatedSeconds: 5 });
+    await generateAllScenes(m.deps, p.id);
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("generating");
+    expect(snap.scenes.map((s) => s.attempts.length)).toEqual([1, 2, 1]);
+    expect(snap.scenes[0]!.approvedAttemptId).toBe(list[0]!.attempt.id);
+    expect(snap.scenes[1]!.approvedAttemptId).toBeNull();
+    expect(snap.scenes[2]!.approvedAttemptId).toBe(list[2]!.attempt.id);
+    const queued = await db.select().from(jobs);
+    expect(queued).toHaveLength(1);
+    expect((queued[0]!.payload as { attemptId: string }).attemptId).toBe(snap.scenes[1]!.attempts[1]!.id);
+  });
+
+  it("generationPlan: sem aprovações conta todas; com tudo aprovado, zero", async () => {
+    expect(generationPlan([{ targetSeconds: 5, approvedAttemptId: null }, { targetSeconds: 6, approvedAttemptId: null }])).toEqual({
+      scenesToGenerate: 2,
+      estimatedSeconds: 11,
+    });
+    expect(generationPlan([{ targetSeconds: 5, approvedAttemptId: "x" }])).toEqual({ scenesToGenerate: 0, estimatedSeconds: 0 });
   });
 });
 

@@ -6,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { assets, jobs, sceneAttempts } from "@/db/schema";
 import { probe, withTempDir } from "@/modules/ffmpeg";
 import { addReference, createProject, getSnapshot, setStage, updateBriefing } from "@/services/projects";
-import { approveAttempt, generateAllScenes, planProjectScript, startAssembly } from "@/services/scenes";
+import { approveAttempt, generateAllScenes, planProjectScript, startAssembly, updateScene } from "@/services/scenes";
 import { buildHandlers } from "@/worker/handlers";
 import { runOnce } from "@/worker/runner";
 import { makeClipBytes, makeDeps } from "../helpers/deps";
@@ -78,6 +78,32 @@ describe("fluxo UGC ponta a ponta com providers falsos", () => {
       expect(out.durationSeconds).toBeLessThan(2.6);
     });
     expect(await db.select().from(jobs).where(and(eq(jobs.status, "failed")))).toHaveLength(0);
+  });
+
+  it("voltar ao roteiro depois de aprovar: só a cena editada é gerada de novo; sem edição, vai direto à revisão", async () => {
+    const m = await makeDeps({ text: [script], video: { clip: await makeClipBytes(1) } });
+    cleanup = m.cleanup;
+    const { p, handlers } = await ugcUntilGenerated(m);
+    let snap = await getSnapshot(db, p.id);
+    for (const s of snap.scenes) await approveAttempt(db, s.id, s.attempts[0]!.id);
+    expect(m.video.starts).toHaveLength(2);
+
+    // Voltar e gerar sem editar nada: nenhuma geração paga.
+    await setStage(db, p.id, "script");
+    await generateAllScenes(m.deps, p.id);
+    expect((await getSnapshot(db, p.id)).project.stage).toBe("review");
+    expect(m.video.starts).toHaveLength(2);
+
+    // Voltar, editar uma cena e gerar: só ela é gerada.
+    await setStage(db, p.id, "script");
+    await updateScene(db, snap.scenes[0]!.id, { dialogue: "Fala editada" }, 8);
+    await generateAllScenes(m.deps, p.id);
+    await drain(handlers);
+    snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("review");
+    expect(m.video.starts).toHaveLength(3);
+    expect(snap.scenes.map((s) => s.attempts.length)).toEqual([2, 1]);
+    expect(snap.scenes[1]!.approvedAttemptId).not.toBeNull();
   });
 
   it("uma cena bloqueada pelo provider não trava as outras: projeto chega em revisão", async () => {

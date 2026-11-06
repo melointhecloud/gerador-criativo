@@ -12,6 +12,15 @@ export function totalSeconds(list: { targetSeconds: number }[]): number {
   return list.reduce((sum, s) => sum + s.targetSeconds, 0);
 }
 
+// O que o próximo "gerar cenas" vai custar: só as cenas sem tentativa aprovada são geradas.
+export function generationPlan(list: { targetSeconds: number; approvedAttemptId: string | null }[]): {
+  scenesToGenerate: number;
+  estimatedSeconds: number;
+} {
+  const pending = list.filter((s) => !s.approvedAttemptId);
+  return { scenesToGenerate: pending.length, estimatedSeconds: totalSeconds(pending) };
+}
+
 // Imagens que podem ser citadas no roteiro: referências com rótulo + personagens aprovados.
 export async function labeledAssets(db: Db, projectId: string): Promise<{ label: string; assetId: string }[]> {
   const refs = await db
@@ -134,9 +143,22 @@ export async function generateAllScenes(deps: Deps, projectId: string): Promise<
     if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
     const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
     if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
+    // Só as cenas sem clipe aprovado são geradas: editar uma cena (updateScene) já limpou a aprovação dela.
+    const toGenerate = list.filter((s) => !s.approvedAttemptId);
+    if (toGenerate.length === 0) {
+      // Tudo aprovado: nada a gerar, vai direto para a revisão (sem custo). Compare-and-set direto, pois
+      // setStage não permite o salto script -> review.
+      const [row] = await tx
+        .update(projects)
+        .set({ stage: "review", updatedAt: new Date() })
+        .where(and(eq(projects.id, projectId), eq(projects.stage, "script")))
+        .returning();
+      if (!row) throw new DomainError("O projeto mudou de etapa; atualize a página e tente de novo");
+      return;
+    }
     // Compare-and-set da etapa: a segunda chamada concorrente espera o commit e falha aqui.
     await setStage(tx, projectId, "generating");
-    for (const scene of list) await createAttempt(tx, scene, project.mode);
+    for (const scene of toGenerate) await createAttempt(tx, scene, project.mode);
   });
 }
 

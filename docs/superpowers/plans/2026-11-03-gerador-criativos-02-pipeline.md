@@ -1376,7 +1376,7 @@ import { eq } from "drizzle-orm";
 import { jobs, projects, sceneAttempts, sceneReferences, scenes } from "@/db/schema";
 import { enqueue } from "@/queue/queue";
 import {
-  approveAttempt, generateAllScenes, planProjectScript, regenerateAllScenes, regenerateScene,
+  approveAttempt, generateAllScenes, generationPlan, planProjectScript, regenerateAllScenes, regenerateScene,
   startAssembly, totalSeconds, updateScene,
 } from "@/services/scenes";
 import { getSnapshot } from "@/services/projects";
@@ -1557,6 +1557,64 @@ describe("generateAllScenes", () => {
   });
 });
 
+describe("generateAllScenes ao voltar para o roteiro (só gera cenas sem aprovação)", () => {
+  // Projeto em roteiro com 3 cenas (5 s cada), todas com clipe aprovado, como depois de voltar da revisão.
+  async function allApprovedBackInScript() {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db, { stage: "script" });
+    const list = [];
+    for (let i = 0; i < 3; i++) {
+      const s = await seedScene(db, p.id, i);
+      const a = await seedAttempt(db, s.id, { status: "done" });
+      await db.update(scenes).set({ approvedAttemptId: a.id }).where(eq(scenes.id, s.id));
+      list.push({ scene: s, attempt: a });
+    }
+    return { m, p, list };
+  }
+
+  it("com tudo aprovado, não cria tentativas nem jobs e vai direto para a revisão", async () => {
+    const { m, p } = await allApprovedBackInScript();
+    await generateAllScenes(m.deps, p.id);
+    expect((await getSnapshot(db, p.id)).project.stage).toBe("review");
+    expect(await db.select().from(sceneAttempts)).toHaveLength(3);
+    expect(await db.select().from(jobs)).toHaveLength(0);
+    expect((await db.select().from(scenes)).every((s) => s.approvedAttemptId)).toBe(true);
+  });
+
+  it("com tudo aprovado, duas chamadas concorrentes: só uma passa", async () => {
+    const { m, p } = await allApprovedBackInScript();
+    const results = await Promise.allSettled([generateAllScenes(m.deps, p.id), generateAllScenes(m.deps, p.id)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason.message)).toMatch(/etapa/);
+  });
+
+  it("depois de editar uma cena, só ela ganha tentativa e job; as outras mantêm a aprovação", async () => {
+    const { m, p, list } = await allApprovedBackInScript();
+    await updateScene(db, list[1]!.scene.id, { dialogue: "Fala nova" }, 8);
+    expect(generationPlan((await getSnapshot(db, p.id)).scenes)).toEqual({ scenesToGenerate: 1, estimatedSeconds: 5 });
+    await generateAllScenes(m.deps, p.id);
+    const snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("generating");
+    expect(snap.scenes.map((s) => s.attempts.length)).toEqual([1, 2, 1]);
+    expect(snap.scenes[0]!.approvedAttemptId).toBe(list[0]!.attempt.id);
+    expect(snap.scenes[1]!.approvedAttemptId).toBeNull();
+    expect(snap.scenes[2]!.approvedAttemptId).toBe(list[2]!.attempt.id);
+    const queued = await db.select().from(jobs);
+    expect(queued).toHaveLength(1);
+    expect((queued[0]!.payload as { attemptId: string }).attemptId).toBe(snap.scenes[1]!.attempts[1]!.id);
+  });
+
+  it("generationPlan: sem aprovações conta todas; com tudo aprovado, zero", async () => {
+    expect(generationPlan([{ targetSeconds: 5, approvedAttemptId: null }, { targetSeconds: 6, approvedAttemptId: null }])).toEqual({
+      scenesToGenerate: 2,
+      estimatedSeconds: 11,
+    });
+    expect(generationPlan([{ targetSeconds: 5, approvedAttemptId: "x" }])).toEqual({ scenesToGenerate: 0, estimatedSeconds: 0 });
+  });
+});
+
 describe("regenerateScene / regenerateAllScenes", () => {
   async function inReview() {
     const m = await makeDeps();
@@ -1711,7 +1769,7 @@ Expected: FAIL — `@/services/scenes` não encontrado.
 
 - [ ] **Step 3: Implementar `src/services/scenes.ts`**
 
-Atomicidade e concorrência: cada operação pública roda em `db.transaction`, com `enqueue` e `setStage` na MESMA transação (aceitam `DbOrTx`, ver Plano 1 `src/db/client.ts`). `regenerateScene`/`regenerateAllScenes` travam a linha da cena (`SELECT ... FOR UPDATE`) e reconferem "tentativa pendente"; `setStage` é compare-and-set sobre a etapa lida. Uma segunda chamada concorrente de `regenerateScene`, `generateAllScenes` ou `startAssembly` é **rejeitada** com `DomainError` em pt-BR; `regenerateAllScenes` concorrente vira no-op (pula cenas já em geração). Os testes de falha de fila usam `vi.mock("@/queue/queue")` com `enqueue` delegando ao real e `mockRejectedValueOnce`.
+Atomicidade e concorrência: cada operação pública roda em `db.transaction`, com `enqueue` e `setStage` na MESMA transação (aceitam `DbOrTx`, ver Plano 1 `src/db/client.ts`). `regenerateScene`/`regenerateAllScenes` travam a linha da cena (`SELECT ... FOR UPDATE`) e reconferem "tentativa pendente"; `setStage` é compare-and-set sobre a etapa lida. Uma segunda chamada concorrente de `regenerateScene`, `generateAllScenes` ou `startAssembly` é **rejeitada** com `DomainError` em pt-BR; `regenerateAllScenes` concorrente vira no-op (pula cenas já em geração). `generateAllScenes` gera só as cenas sem tentativa aprovada (`approvedAttemptId` nulo; `updateScene` já limpa a aprovação da cena editada); se todas estão aprovadas, não passa por `generating`: faz um UPDATE guardado `script` → `review` (compare-and-set, pois `setStage` proíbe o salto) e não enfileira nada. `generationPlan` calcula `scenesToGenerate`/`estimatedSeconds` para a API e a UI. Os testes de falha de fila usam `vi.mock("@/queue/queue")` com `enqueue` delegando ao real e `mockRejectedValueOnce`.
 
 ```ts
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
@@ -1726,6 +1784,15 @@ import { getProject, setStage, type Scene } from "./projects";
 
 export function totalSeconds(list: { targetSeconds: number }[]): number {
   return list.reduce((sum, s) => sum + s.targetSeconds, 0);
+}
+
+// O que o próximo "gerar cenas" vai custar: só as cenas sem tentativa aprovada são geradas.
+export function generationPlan(list: { targetSeconds: number; approvedAttemptId: string | null }[]): {
+  scenesToGenerate: number;
+  estimatedSeconds: number;
+} {
+  const pending = list.filter((s) => !s.approvedAttemptId);
+  return { scenesToGenerate: pending.length, estimatedSeconds: totalSeconds(pending) };
 }
 
 // Imagens que podem ser citadas no roteiro: referências com rótulo + personagens aprovados.
@@ -1850,9 +1917,22 @@ export async function generateAllScenes(deps: Deps, projectId: string): Promise<
     if (project.stage !== "script") throw new DomainError("Aprove o roteiro na etapa de roteiro antes de gerar");
     const list = await tx.select().from(scenes).where(eq(scenes.projectId, projectId)).orderBy(asc(scenes.position));
     if (list.length === 0) throw new DomainError("Gere o roteiro: não há nenhuma cena");
+    // Só as cenas sem clipe aprovado são geradas: editar uma cena (updateScene) já limpou a aprovação dela.
+    const toGenerate = list.filter((s) => !s.approvedAttemptId);
+    if (toGenerate.length === 0) {
+      // Tudo aprovado: nada a gerar, vai direto para a revisão (sem custo). Compare-and-set direto, pois
+      // setStage não permite o salto script -> review.
+      const [row] = await tx
+        .update(projects)
+        .set({ stage: "review", updatedAt: new Date() })
+        .where(and(eq(projects.id, projectId), eq(projects.stage, "script")))
+        .returning();
+      if (!row) throw new DomainError("O projeto mudou de etapa; atualize a página e tente de novo");
+      return;
+    }
     // Compare-and-set da etapa: a segunda chamada concorrente espera o commit e falha aqui.
     await setStage(tx, projectId, "generating");
-    for (const scene of list) await createAttempt(tx, scene, project.mode);
+    for (const scene of toGenerate) await createAttempt(tx, scene, project.mode);
   });
 }
 
@@ -3681,7 +3761,7 @@ import { and, eq } from "drizzle-orm";
 import { assets, jobs, sceneAttempts } from "@/db/schema";
 import { probe, withTempDir } from "@/modules/ffmpeg";
 import { addReference, createProject, getSnapshot, setStage, updateBriefing } from "@/services/projects";
-import { approveAttempt, generateAllScenes, planProjectScript, startAssembly } from "@/services/scenes";
+import { approveAttempt, generateAllScenes, planProjectScript, startAssembly, updateScene } from "@/services/scenes";
 import { buildHandlers } from "@/worker/handlers";
 import { runOnce } from "@/worker/runner";
 import { makeClipBytes, makeDeps } from "../helpers/deps";
@@ -3755,6 +3835,32 @@ describe("fluxo UGC ponta a ponta com providers falsos", () => {
     expect(await db.select().from(jobs).where(and(eq(jobs.status, "failed")))).toHaveLength(0);
   });
 
+  it("voltar ao roteiro depois de aprovar: só a cena editada é gerada de novo; sem edição, vai direto à revisão", async () => {
+    const m = await makeDeps({ text: [script], video: { clip: await makeClipBytes(1) } });
+    cleanup = m.cleanup;
+    const { p, handlers } = await ugcUntilGenerated(m);
+    let snap = await getSnapshot(db, p.id);
+    for (const s of snap.scenes) await approveAttempt(db, s.id, s.attempts[0]!.id);
+    expect(m.video.starts).toHaveLength(2);
+
+    // Voltar e gerar sem editar nada: nenhuma geração paga.
+    await setStage(db, p.id, "script");
+    await generateAllScenes(m.deps, p.id);
+    expect((await getSnapshot(db, p.id)).project.stage).toBe("review");
+    expect(m.video.starts).toHaveLength(2);
+
+    // Voltar, editar uma cena e gerar: só ela é gerada.
+    await setStage(db, p.id, "script");
+    await updateScene(db, snap.scenes[0]!.id, { dialogue: "Fala editada" }, 8);
+    await generateAllScenes(m.deps, p.id);
+    await drain(handlers);
+    snap = await getSnapshot(db, p.id);
+    expect(snap.project.stage).toBe("review");
+    expect(m.video.starts).toHaveLength(3);
+    expect(snap.scenes.map((s) => s.attempts.length)).toEqual([2, 1]);
+    expect(snap.scenes[1]!.approvedAttemptId).not.toBeNull();
+  });
+
   it("uma cena bloqueada pelo provider não trava as outras: projeto chega em revisão", async () => {
     const m = await makeDeps({ text: [script], video: { clip: await makeClipBytes(1) } });
     cleanup = m.cleanup;
@@ -3778,7 +3884,7 @@ describe("fluxo UGC ponta a ponta com providers falsos", () => {
 ```
 
 Run: `pnpm vitest run tests/worker/flow.test.ts`
-Expected: 2 testes PASS (~3 s).
+Expected: 3 testes PASS (~3 s).
 
 - [ ] **Step 8: Commit**
 
@@ -4415,7 +4521,7 @@ git commit -m "feat(providers): gemini text/image, omni video, dev providers and
 ## Auto-revisão do Plano 2 contra o spec
 
 - §4 módulos: `script-planner` (T3), `character-designer` (T4, T8), `scene-generator` (T7), `assembler` (T9), `job-queue` (Plano 1) + runner (T10), providers reais (T11).
-- §5 fluxo: briefing/referências e guardas de etapa (T5); roteiro com feedback e edição manual (T3, T6); geração com estimativa de segundos via `totalSeconds` (T6); revisão: aprovar, regerar uma ou todas, restaurar tentativa antiga via `approveAttempt` (T6); montagem (T6, T9).
+- §5 fluxo: briefing/referências e guardas de etapa (T5); roteiro com feedback e edição manual (T3, T6); geração com estimativa de segundos via `generationPlan` (T6; só cenas sem aprovação); revisão: aprovar, regerar uma ou todas, restaurar tentativa antiga via `approveAttempt` (T6); montagem (T6, T9).
 - §5 regras: editar cena invalida só o clipe dela (T6 `updateScene`); falha de uma cena não trava as demais (T7 + `advanceToReviewIfIdle`); tentativa guarda prompt, referências e clipe (T6, T7).
 - §7 erros: retomada pelo `providerRef` persistido (T7); retry com backoff (Plano 1 + T10); bloqueio de segurança sem retry (T7, T11); idempotência de handler (T7); schema do roteiro validado com retry limitado (T3).
 - Decisão de implementação não prevista no spec: o planejamento de roteiro e a proposta de personagens (texto) rodam na web via serviços (chamada de poucos segundos); só imagem, vídeo e montagem passam pela fila. O spec afirma que a web "nunca chama Veo diretamente", o que continua verdadeiro.

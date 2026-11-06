@@ -172,6 +172,7 @@ describe("projetos", () => {
     const snap = await res.json();
     expect(snap.project.stage).toBe("briefing");
     expect(snap.estimatedSeconds).toBe(0);
+    expect(snap.scenesToGenerate).toBe(0);
     expect(snap.scenes).toEqual([]);
   });
 

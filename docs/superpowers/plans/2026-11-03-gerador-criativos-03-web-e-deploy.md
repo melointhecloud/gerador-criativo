@@ -908,6 +908,7 @@ describe("projetos", () => {
     const snap = await res.json();
     expect(snap.project.stage).toBe("briefing");
     expect(snap.estimatedSeconds).toBe(0);
+    expect(snap.scenesToGenerate).toBe(0);
     expect(snap.scenes).toEqual([]);
   });
 
@@ -1305,12 +1306,12 @@ export const POST = api(async ({ params, deps }) => {
 ```ts
 import { z } from "zod";
 import { getSnapshot, updateBriefing } from "@/services/projects";
-import { totalSeconds } from "@/services/scenes";
+import { generationPlan } from "@/services/scenes";
 import { api } from "@/web/http";
 
 export const GET = api(async ({ params, deps }) => {
   const snap = await getSnapshot(deps.db, params.id);
-  return { ...snap, estimatedSeconds: totalSeconds(snap.scenes) };
+  return { ...snap, ...generationPlan(snap.scenes) };
 });
 
 export const PATCH = api(async ({ req, params, deps }) => {
@@ -1603,7 +1604,10 @@ video.clip { width: 100%; max-width: 260px; aspect-ratio: 9 / 16; background: #0
 import type { Snapshot } from "@/services/projects";
 
 // Resposta de GET /api/projects/:id. As datas chegam como string (JSON), mas a UI não as usa.
-export type ProjectView = Snapshot & { estimatedSeconds: number };
+export type ProjectView = Snapshot & {
+  estimatedSeconds: number; // segundos que a próxima geração vai custar (só cenas sem aprovação)
+  scenesToGenerate: number;
+};
 export type PanelProps = {
   snap: ProjectView;
   working: boolean;
@@ -2252,7 +2256,7 @@ function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "w
 }
 
 export function ScriptPanel({ snap, run, working }: PanelProps) {
-  const { project, scenes, estimatedSeconds } = snap;
+  const { project, scenes, estimatedSeconds, scenesToGenerate } = snap;
   const [feedback, setFeedback] = useState("");
   const hasScenes = scenes.length > 0;
 
@@ -2290,16 +2294,22 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
       {hasScenes && (
         <div className="card row" style={{ justifyContent: "space-between" }}>
           <span>
-            {scenes.length} cenas · {estimatedSeconds} s de vídeo a gerar
+            {scenesToGenerate === 0
+              ? `${scenes.length} cenas · todas já aprovadas`
+              : `${scenesToGenerate} de ${scenes.length} cenas a gerar · ${estimatedSeconds} s de vídeo`}
           </span>
           <button
             disabled={working}
             onClick={() => {
-              if (!confirm(`Serão geradas ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Continuar?`)) return;
+              const message =
+                scenesToGenerate === 0
+                  ? null
+                  : `Serão geradas ${scenesToGenerate} de ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Cenas já aprovadas serão mantidas. Continuar?`;
+              if (message && !confirm(message)) return;
               void run(() => api(`/api/projects/${project.id}/generate`, { method: "POST", body: {} }));
             }}
           >
-            Aprovar roteiro e gerar cenas
+            {scenesToGenerate === 0 ? "Ir para a revisão" : "Aprovar roteiro e gerar cenas"}
           </button>
         </div>
       )}
@@ -2563,7 +2573,7 @@ Expected: os dois builds terminam sem erro; a última linha imprime `ffmpeg vers
 
 - [ ] **Step 5: Criar `README.md`**
 
-Conteúdo: o `README.md` do repositório (visão geral, execução local com providers falsos, testes, tabela de variáveis de ambiente conferida com `src/config/env.ts`, estado do provider Gemini, deploy no Railway com checklist, notas de segurança e operação; inclui as notas sobre arquivos órfãos no bucket, cookie `Secure` fora de `pnpm dev` e o texto de teste do modo fake).
+Conteúdo: o `README.md` do repositório (visão geral, nota sobre voltar ao roteiro só gerar cenas sem aprovação, execução local com providers falsos, testes, tabela de variáveis de ambiente conferida com `src/config/env.ts`, estado do provider Gemini, deploy no Railway com checklist, notas de segurança e operação; inclui as notas sobre arquivos órfãos no bucket, cookie `Secure` fora de `pnpm dev` e o texto de teste do modo fake).
 
 - [ ] **Step 6: Commit**
 
@@ -2641,5 +2651,5 @@ git commit -m "docs: record production smoke test"
 - §4 arquitetura: web + worker + Postgres + bucket (T5, T6). Divergência do spec: arquivos servidos por rota autenticada da web com `Range`, em vez de URL assinada do bucket (mantém todo acesso atrás da senha e evita expor o bucket).
 - §5 estados: UI mostra o painel de cada etapa e só permite as transições que o serviço aceita; voltar a etapas anteriores pelos botões da barra (T4 `ProjectView`).
 - §9 segredos: só em variáveis de ambiente (README); `.env` fora do git (Plano 1).
-- Estimativa de segundos antes de gerar: `estimatedSeconds` na API + confirmação no `ScriptPanel` (T3, T4).
+- Estimativa antes de gerar: `estimatedSeconds`/`scenesToGenerate` (só cenas sem aprovação) na API + confirmação no `ScriptPanel` (T3, T4).
 - Consistência de nomes: `api()` (wrapper no servidor) vs `api()` (cliente em `src/lib/api.ts`) vivem em módulos diferentes (`@/web/http` e `@/lib/api`) e nunca são importados juntos.
