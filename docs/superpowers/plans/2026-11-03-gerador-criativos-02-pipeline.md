@@ -1104,7 +1104,7 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
 }
 
 // Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
-export async function advanceToReviewIfIdle(db: Db, projectId: string): Promise<void> {
+export async function advanceToReviewIfIdle(db: DbOrTx, projectId: string): Promise<void> {
   const project = await getProject(db, projectId);
   if (project.stage !== "generating") return;
   const pending = await db
@@ -1832,6 +1832,33 @@ describe("onGenerateSceneDead", () => {
     expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
   });
 });
+
+describe("referência removida (carry-forward A)", () => {
+  it("falha com mensagem clara em pt-BR, sem chamar o provider, e avança o projeto", async () => {
+    const { m, p, attempt, ref } = await setup();
+    await db.delete(assets).where(eq(assets.id, ref.id));
+    await handleGenerateScene(m.deps, { attemptId: attempt.id });
+    expect(m.video.starts).toHaveLength(0);
+    const a = await attemptOf(attempt.id);
+    expect(a.status).toBe("failed");
+    expect(a.error).toContain("referência");
+    expect((await db.select().from(projects).where(eq(projects.id, p.id)))[0]!.stage).toBe("review");
+  });
+});
+
+describe("persistência do providerRef (carry-forward C)", () => {
+  it("salva o providerRef logo após start(), antes do primeiro poll", async () => {
+    const { m, attempt } = await setup();
+    let seen: string | null = "não lido";
+    const poll = m.video.poll.bind(m.video);
+    m.video.poll = async (h) => {
+      seen = (await attemptOf(attempt.id)).providerRef;
+      return poll(h);
+    };
+    await handleGenerateScene(m.deps, { attemptId: attempt.id });
+    expect(seen).toBe("fake-1");
+  });
+});
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -1845,7 +1872,7 @@ Expected: FAIL — módulo não encontrado.
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { eq, inArray } from "drizzle-orm";
-import type { Db } from "@/db/client";
+import type { DbOrTx } from "@/db/client";
 import { assets, sceneAttempts, scenes, type AttemptStatus } from "@/db/schema";
 import type { Deps } from "@/deps";
 import { PermanentError, RetryLater } from "@/queue/errors";
@@ -1858,9 +1885,11 @@ const TERMINAL: AttemptStatus[] = ["done", "failed", "blocked"];
 
 type AttemptPatch = Partial<typeof sceneAttempts.$inferInsert>;
 
-async function patchAttempt(db: Db, id: string, patch: AttemptPatch) {
+async function patchAttempt(db: DbOrTx, id: string, patch: AttemptPatch) {
   await db.update(sceneAttempts).set({ ...patch, updatedAt: new Date() }).where(eq(sceneAttempts.id, id));
 }
+
+class MissingReferenceError extends Error {}
 
 async function loadReferences(deps: Deps, assetIds: string[]): Promise<ReferenceImage[]> {
   if (assetIds.length === 0) return [];
@@ -1869,7 +1898,8 @@ async function loadReferences(deps: Deps, assetIds: string[]): Promise<Reference
   const out: ReferenceImage[] = [];
   for (const id of assetIds) {
     const asset = byId.get(id);
-    if (!asset) continue; // referência removida depois da criação da tentativa
+    // scene_attempts.reference_asset_ids não tem FK: o usuário pode ter removido a imagem no briefing.
+    if (!asset) throw new MissingReferenceError("Uma imagem de referência desta cena foi removida. Gere a cena novamente.");
     out.push({
       bytes: await deps.storage.get(asset.storageKey),
       mimeType: asset.mimeType,
@@ -1879,9 +1909,12 @@ async function loadReferences(deps: Deps, assetIds: string[]): Promise<Reference
   return out;
 }
 
-async function finish(db: Db, projectId: string, attemptId: string, patch: AttemptPatch) {
-  await patchAttempt(db, attemptId, patch);
-  await advanceToReviewIfIdle(db, projectId);
+// Marca a tentativa como finalizada e, se não sobrou nada em andamento, avança o projeto — tudo atômico.
+async function finish(deps: Deps, projectId: string, attemptId: string, patch: AttemptPatch) {
+  await deps.db.transaction(async (tx) => {
+    await patchAttempt(tx, attemptId, patch);
+    await advanceToReviewIfIdle(tx, projectId);
+  });
 }
 
 export async function handleGenerateScene(deps: Deps, payload: { attemptId: string }): Promise<void> {
@@ -1902,7 +1935,7 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
         targetSeconds: scene.targetSeconds,
       });
       providerRef = started.providerRef;
-      // Persistir antes de qualquer espera: se o worker reiniciar, o polling continua daqui.
+      // Persistir imediatamente, antes de qualquer espera: se o worker reiniciar, o polling continua daqui.
       await patchAttempt(db, attempt.id, { providerRef, status: "generating" });
     }
 
@@ -1914,7 +1947,7 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
         await patchAttempt(db, attempt.id, { providerRef: null });
         throw new ProviderError(result.reason, true);
       }
-      await finish(db, scene.projectId, attempt.id, { status: "blocked", error: result.reason });
+      await finish(deps, scene.projectId, attempt.id, { status: "blocked", error: result.reason });
       return;
     }
 
@@ -1925,46 +1958,57 @@ export async function handleGenerateScene(deps: Deps, payload: { attemptId: stri
     });
     const key = `projects/${scene.projectId}/clips/${attempt.id}.mp4`;
     await storage.put(key, result.bytes, "video/mp4");
-    const [clip] = await db
-      .insert(assets)
-      .values({
-        projectId: scene.projectId,
-        kind: "clip",
-        storageKey: key,
-        mimeType: "video/mp4",
-        durationSeconds: measured.durationSeconds,
-      })
-      .returning();
-    await finish(db, scene.projectId, attempt.id, { status: "done", clipAssetId: clip!.id, error: null });
+    // Asset + status + avanço de etapa numa transação: reexecutar não duplica clipe.
+    await db.transaction(async (tx) => {
+      const [clip] = await tx
+        .insert(assets)
+        .values({
+          projectId: scene.projectId,
+          kind: "clip",
+          storageKey: key,
+          mimeType: "video/mp4",
+          durationSeconds: measured.durationSeconds,
+        })
+        .returning();
+      await patchAttempt(tx, attempt.id, { status: "done", clipAssetId: clip!.id, error: null });
+      await advanceToReviewIfIdle(tx, scene.projectId);
+    });
   } catch (e) {
+    if (e instanceof MissingReferenceError) {
+      await finish(deps, scene.projectId, attempt.id, { status: "failed", error: e.message });
+      return;
+    }
     if (e instanceof ProviderError && !e.retryable) {
-      await finish(db, scene.projectId, attempt.id, { status: "blocked", error: e.message });
+      await finish(deps, scene.projectId, attempt.id, { status: "blocked", error: e.message });
       return;
     }
     throw e;
   }
 }
 
-// Chamado pelo runner quando o job esgotou as tentativas.
+// Chamado pelo runner quando o job esgotou as tentativas (ou foi recuperado já morto).
 export async function onGenerateSceneDead(deps: Deps, payload: { attemptId: string }, message: string): Promise<void> {
   const { db } = deps;
   const [attempt] = await db.select().from(sceneAttempts).where(eq(sceneAttempts.id, payload.attemptId));
   if (!attempt || TERMINAL.includes(attempt.status)) return;
   const [scene] = await db.select().from(scenes).where(eq(scenes.id, attempt.sceneId));
-  await patchAttempt(db, attempt.id, { status: "failed", error: message });
-  if (scene) await advanceToReviewIfIdle(db, scene.projectId);
+  if (!scene) {
+    await patchAttempt(db, attempt.id, { status: "failed", error: message });
+    return;
+  }
+  await finish(deps, scene.projectId, attempt.id, { status: "failed", error: message });
 }
 ```
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/scene-generator.test.ts && pnpm typecheck`
-Expected: 8 testes PASS; typecheck limpo.
+Expected: 11 testes PASS; typecheck limpo.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/modules/scene-generator.ts tests/modules/scene-generator.test.ts
+git add src/modules/scene-generator.ts src/services/projects.ts tests/modules/scene-generator.test.ts
 git commit -m "feat(modules): resumable scene generation handler"
 ```
 

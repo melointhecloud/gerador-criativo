@@ -127,7 +127,7 @@ export async function setStage(db: DbOrTx, projectId: string, target: Stage): Pr
 }
 
 // Chamado pelo worker ao terminar cada tentativa: quando nada mais está pendente, o projeto vai para revisão.
-export async function advanceToReviewIfIdle(db: Db, projectId: string): Promise<void> {
+export async function advanceToReviewIfIdle(db: DbOrTx, projectId: string): Promise<void> {
   const project = await getProject(db, projectId);
   if (project.stage !== "generating") return;
   const pending = await db
