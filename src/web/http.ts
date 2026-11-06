@@ -10,7 +10,7 @@ export const FILE_HEADERS = {
   "Cache-Control": "private, max-age=3600",
   "X-Content-Type-Options": "nosniff",
 } as const;
-const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
+export const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
 
 export function readCookie(header: string | null, name: string): string | undefined {
   if (!header) return undefined;

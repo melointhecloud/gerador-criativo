@@ -88,15 +88,30 @@ describe("auth", () => {
 });
 
 describe("auth: freio e logout", () => {
-  it("após 10 falhas responde 429 com Retry-After, mesmo com a senha certa; sucesso antes disso zera", async () => {
-    const login_ = (password: string) => call(login.POST, { method: "POST", body: { password }, cookie: null });
-    for (let i = 0; i < 9; i++) expect((await login_("errada")).status).toBe(401);
-    expect((await login_("segredo")).status).toBe(200); // zera
-    for (let i = 0; i < 10; i++) expect((await login_("errada")).status).toBe(401);
+  const login_ = (password: string) => call(login.POST, { method: "POST", body: { password }, cookie: null });
+
+  it("após 30 falhas responde 429 com Retry-After e nosniff, mesmo com a senha certa", async () => {
+    for (let i = 0; i < 30; i++) expect((await login_("errada")).status).toBe(401);
     const blocked = await login_("segredo");
     expect(blocked.status).toBe(429);
     expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(blocked.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(blocked.headers.get("cache-control")).toBe("private, no-store");
     expect((await blocked.json()).error).toContain("Muitas tentativas");
+  });
+
+  it("40 requisições paralelas com senha errada: só 30 passam pela checagem (401), o resto leva 429", async () => {
+    const res = await Promise.all(Array.from({ length: 40 }, () => login_("errada")));
+    const statuses = res.map((r) => r.status);
+    expect(statuses.filter((s) => s === 401)).toHaveLength(30);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(10);
+  });
+
+  it("login certo não devolve orçamento novo: desfaz só a própria tentativa", async () => {
+    for (let i = 0; i < 29; i++) expect((await login_("errada")).status).toBe(401);
+    expect((await login_("segredo")).status).toBe(200); // conta 30, desfaz -> 29
+    expect((await login_("errada")).status).toBe(401); // 30
+    expect((await login_("errada")).status).toBe(429); // continua limitado: os 29 anteriores valem
   });
 
   it("logout (POST, autenticado) limpa o cookie", async () => {
@@ -275,5 +290,23 @@ describe("upload de referência", () => {
     const res = await upload(p.id, big);
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("10 MB");
+  });
+
+  it("Content-Length acima de 10,5 MB é recusado (413) sem ler o corpo", async () => {
+    const p = await seedProject(testDb);
+    const req = new Request("http://test/", {
+      method: "POST",
+      headers: { cookie, "content-type": "multipart/form-data; boundary=x", "content-length": String(11 * 1024 * 1024) },
+      body: "--x--",
+    });
+    let parsed = false;
+    req.formData = async () => {
+      parsed = true;
+      return new FormData();
+    };
+    const res = await referencesRoute.POST(req, { params: Promise.resolve({ id: p.id }) });
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toContain("10 MB");
+    expect(parsed).toBe(false);
   });
 });

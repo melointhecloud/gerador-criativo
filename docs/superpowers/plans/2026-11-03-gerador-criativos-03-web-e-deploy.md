@@ -566,7 +566,7 @@ export const FILE_HEADERS = {
   "Cache-Control": "private, max-age=3600",
   "X-Content-Type-Options": "nosniff",
 } as const;
-const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
+export const JSON_HEADERS = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } as const;
 
 export function readCookie(header: string | null, name: string): string | undefined {
   if (!header) return undefined;
@@ -723,7 +723,8 @@ git commit -m "feat(web): request context, api wrapper and range parser"
 
 Regras desta task (aplicadas no código abaixo; o código foi executado e os testes passam):
 - Toda rota passa por `api()` com auth ligada; **só o login usa `auth: false`** (logout também exige sessão). O teste "nenhuma é pública" lista `src/app/api/**/route.ts` e exige 401 sem cookie em todo handler exportado, e que `GET` exista só nas 3 rotas de leitura.
-- Login: freio em memória (`src/web/login-throttle.ts`: 10 falhas em 15 min viram 429 com `Retry-After`; sucesso zera; atraso de 300 ms após falha, `loginThrottle.failDelayMs = 0` nos testes). Contador global (1 réplica); um atacante pode travar o login por 15 min, aceito.
+- Upload de referência: `Content-Length` acima de 10,5 MB é recusado com 413 antes do `formData()`; o `file.size` (10 MB) é checado depois do parse.
+- Login: freio em memória (`src/web/login-throttle.ts`: `attempt()` conta a tentativa de forma atômica ANTES de ler o corpo e checar a senha (senão requisições paralelas furam o limite); 30 tentativas em 15 min viram 429 com `Retry-After` e `nosniff`; login certo só desfaz a própria tentativa (`undo()`), nunca zera o contador; atraso de 300 ms após falha, `loginThrottle.failDelayMs = 0` nos testes). Contador global (1 réplica); um atacante pode travar o login por 15 min, aceito.
 - Arquivos: `FILE_HEADERS`, `Content-Type` do registro, 416 com `Content-Range: bytes */N`, objeto ausente no storage vira 404 (`isMissingObject`), chave de storage nunca sai na resposta. Lê o objeto inteiro e fatia o Buffer (poucos MB).
 - Upload: tipo vem de `File.type` (whitelist), `file.size` checado antes de ler o corpo, rótulo obrigatório.
 - `params` chega como `Record<string, string>` (o `api()` resolve a Promise do Next); `noUncheckedIndexedAccess` está desligado, então `params.id` é `string`.
@@ -823,15 +824,30 @@ describe("auth", () => {
 });
 
 describe("auth: freio e logout", () => {
-  it("após 10 falhas responde 429 com Retry-After, mesmo com a senha certa; sucesso antes disso zera", async () => {
-    const login_ = (password: string) => call(login.POST, { method: "POST", body: { password }, cookie: null });
-    for (let i = 0; i < 9; i++) expect((await login_("errada")).status).toBe(401);
-    expect((await login_("segredo")).status).toBe(200); // zera
-    for (let i = 0; i < 10; i++) expect((await login_("errada")).status).toBe(401);
+  const login_ = (password: string) => call(login.POST, { method: "POST", body: { password }, cookie: null });
+
+  it("após 30 falhas responde 429 com Retry-After e nosniff, mesmo com a senha certa", async () => {
+    for (let i = 0; i < 30; i++) expect((await login_("errada")).status).toBe(401);
     const blocked = await login_("segredo");
     expect(blocked.status).toBe(429);
     expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(blocked.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(blocked.headers.get("cache-control")).toBe("private, no-store");
     expect((await blocked.json()).error).toContain("Muitas tentativas");
+  });
+
+  it("40 requisições paralelas com senha errada: só 30 passam pela checagem (401), o resto leva 429", async () => {
+    const res = await Promise.all(Array.from({ length: 40 }, () => login_("errada")));
+    const statuses = res.map((r) => r.status);
+    expect(statuses.filter((s) => s === 401)).toHaveLength(30);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(10);
+  });
+
+  it("login certo não devolve orçamento novo: desfaz só a própria tentativa", async () => {
+    for (let i = 0; i < 29; i++) expect((await login_("errada")).status).toBe(401);
+    expect((await login_("segredo")).status).toBe(200); // conta 30, desfaz -> 29
+    expect((await login_("errada")).status).toBe(401); // 30
+    expect((await login_("errada")).status).toBe(429); // continua limitado: os 29 anteriores valem
   });
 
   it("logout (POST, autenticado) limpa o cookie", async () => {
@@ -1011,6 +1027,24 @@ describe("upload de referência", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("10 MB");
   });
+
+  it("Content-Length acima de 10,5 MB é recusado (413) sem ler o corpo", async () => {
+    const p = await seedProject(testDb);
+    const req = new Request("http://test/", {
+      method: "POST",
+      headers: { cookie, "content-type": "multipart/form-data; boundary=x", "content-length": String(11 * 1024 * 1024) },
+      body: "--x--",
+    });
+    let parsed = false;
+    req.formData = async () => {
+      parsed = true;
+      return new FormData();
+    };
+    const res = await referencesRoute.POST(req, { params: Promise.resolve({ id: p.id }) });
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toContain("10 MB");
+    expect(parsed).toBe(false);
+  });
 });
 ```
 
@@ -1020,27 +1054,53 @@ import { describe, expect, it } from "vitest";
 import { createLoginThrottle } from "@/web/login-throttle";
 
 describe("login throttle", () => {
-  it("bloqueia após 10 falhas na janela e libera quando ela expira", () => {
+  it("attempt conta na hora: bloqueia na tentativa seguinte ao limite e libera quando a janela expira", () => {
     let t = 1000;
-    const th = createLoginThrottle({ now: () => t });
-    for (let i = 0; i < 9; i++) th.fail();
-    expect(th.check().blocked).toBe(false);
-    th.fail();
-    const r = th.check();
+    const th = createLoginThrottle({ max: 3, now: () => t });
+    for (let i = 0; i < 3; i++) expect(th.attempt().blocked).toBe(false);
+    const r = th.attempt();
     expect(r.blocked).toBe(true);
     if (r.blocked) expect(r.retryAfterS).toBe(900);
     t += 15 * 60 * 1000 - 1;
-    expect(th.check().blocked).toBe(true);
+    expect(th.attempt().blocked).toBe(true);
     t += 1;
-    expect(th.check().blocked).toBe(false);
+    expect(th.attempt().blocked).toBe(false); // janela nova, contador zerado
   });
 
-  it("sucesso zera o contador", () => {
+  it("o limite padrão é 30 tentativas por janela de 15 minutos", () => {
     const th = createLoginThrottle({ now: () => 0 });
-    for (let i = 0; i < 9; i++) th.fail();
-    th.success();
-    for (let i = 0; i < 9; i++) th.fail();
-    expect(th.check().blocked).toBe(false);
+    for (let i = 0; i < 30; i++) expect(th.attempt().blocked).toBe(false);
+    const r = th.attempt();
+    expect(r.blocked).toBe(true);
+    if (r.blocked) expect(r.retryAfterS).toBe(900);
+  });
+
+  it("undo desfaz só a tentativa corrente (não zera o contador) e nunca passa de zero", () => {
+    const th = createLoginThrottle({ max: 3, now: () => 0 });
+    th.attempt();
+    th.attempt();
+    th.attempt(); // 3 no contador
+    th.undo(); // 2
+    expect(th.attempt().blocked).toBe(false); // 3
+    expect(th.attempt().blocked).toBe(true);
+    const fresh = createLoginThrottle({ max: 1, now: () => 0 });
+    fresh.undo();
+    fresh.undo();
+    expect(fresh.attempt().blocked).toBe(false);
+    expect(fresh.attempt().blocked).toBe(true);
+  });
+
+  it("o contador recomeça do zero ao expirar a janela e undo nunca fica abaixo de zero", () => {
+    let t = 0;
+    const th = createLoginThrottle({ max: 2, now: () => t });
+    th.attempt();
+    t += 15 * 60 * 1000;
+    th.attempt(); // janela nova, contador 1
+    th.undo(); // 1 -> 0
+    th.undo(); // continua em 0
+    expect(th.attempt().blocked).toBe(false);
+    expect(th.attempt().blocked).toBe(false);
+    expect(th.attempt().blocked).toBe(true);
   });
 });
 ```
@@ -1057,16 +1117,17 @@ Expected: FAIL — rotas não encontradas.
 // Freio simples de tentativas de login, em memória (o serviço `web` roda com 1 réplica).
 // Contador global (não por IP): X-Forwarded-For é forjável e o time é pequeno. Um atacante pode, no pior caso,
 // travar o login por 15 min; isso é aceito em troca de impedir força bruta.
+// A tentativa é contada ANTES de checar a senha (`attempt` confere e incrementa num único passo síncrono), senão
+// requisições paralelas passariam todas pela checagem antes de a primeira falha ser registrada.
 export type Throttle = {
   failDelayMs: number;
-  check(): { blocked: false } | { blocked: true; retryAfterS: number };
-  fail(): void;
-  success(): void;
+  attempt(): { blocked: false } | { blocked: true; retryAfterS: number };
+  undo(): void;
   reset(): void;
 };
 
 export function createLoginThrottle(opts: { max?: number; windowMs?: number; now?: () => number; failDelayMs?: number } = {}): Throttle {
-  const max = opts.max ?? 10;
+  const max = opts.max ?? 30;
   const windowMs = opts.windowMs ?? 15 * 60 * 1000;
   const now = opts.now ?? Date.now;
   let count = 0;
@@ -1078,18 +1139,16 @@ export function createLoginThrottle(opts: { max?: number; windowMs?: number; now
 
   return {
     failDelayMs: opts.failDelayMs ?? 300,
-    check() {
+    attempt() {
       expire();
       if (count >= max) return { blocked: true, retryAfterS: Math.max(1, Math.ceil((windowStart + windowMs - now()) / 1000)) };
-      return { blocked: false };
-    },
-    fail() {
-      expire();
       if (count === 0) windowStart = now();
       count += 1;
+      return { blocked: false };
     },
-    success() {
-      count = 0;
+    // Login certo: desfaz só a tentativa dele (nunca zera o contador: não pode dar orçamento novo a um atacante).
+    undo() {
+      if (count > 0) count -= 1;
     },
     reset() {
       count = 0;
@@ -1115,26 +1174,26 @@ export function isMissingObject(e: unknown): boolean {
 import { z } from "zod";
 import { createSession, passwordMatches, SESSION_COOKIE, SESSION_MAX_AGE_S } from "@/auth/session";
 import { DomainError } from "@/services/errors";
-import { api } from "@/web/http";
+import { api, JSON_HEADERS } from "@/web/http";
 import { loginThrottle } from "@/web/login-throttle";
 
 // Única rota sem sessão. Mensagem de erro genérica: não revela nada além de "senha incorreta".
 export const POST = api(
   async ({ req, env }) => {
-    const blocked = loginThrottle.check();
-    if (blocked.blocked) {
+    // Conta a tentativa antes de qualquer trabalho caro (ler o corpo, checar a senha): ver login-throttle.ts.
+    const attempt = loginThrottle.attempt();
+    if (attempt.blocked) {
       return Response.json(
         { error: "Muitas tentativas. Tente novamente em alguns minutos." },
-        { status: 429, headers: { "Retry-After": String(blocked.retryAfterS), "Cache-Control": "private, no-store" } },
+        { status: 429, headers: { ...JSON_HEADERS, "Retry-After": String(attempt.retryAfterS) } },
       );
     }
     const { password } = z.object({ password: z.string().max(500) }).parse(await req.json());
     if (!(await passwordMatches(password, env.ACCESS_PASSWORD))) {
-      loginThrottle.fail();
       if (loginThrottle.failDelayMs > 0) await new Promise((r) => setTimeout(r, loginThrottle.failDelayMs));
       throw new DomainError("Senha incorreta", 401);
     }
-    loginThrottle.success();
+    loginThrottle.undo();
     const token = await createSession(env.SESSION_SECRET);
     const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
     return Response.json(
@@ -1194,9 +1253,15 @@ import { addReference } from "@/services/projects";
 import { api } from "@/web/http";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+// Arquivo de 10 MB mais a sobrecarga do multipart (limite do Content-Length, que pode ser maior que o arquivo).
+const MAX_BODY_BYTES = 10.5 * 1024 * 1024;
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
 export const POST = api(async ({ req, params, deps }) => {
+  // Recusa cedo pelo Content-Length declarado, antes de o formData() ler o corpo para a memória.
+  // (Cabeçalho ausente ou mentiroso não é barrado aqui; o `file.size` abaixo é a checagem após o parse.)
+  const declared = Number(req.headers.get("content-length"));
+  if (req.headers.has("content-length") && declared > MAX_BODY_BYTES) throw new DomainError("Imagem maior que 10 MB", 413);
   const form = await req.formData().catch(() => {
     throw new DomainError("Envie o formulário com uma imagem");
   });
@@ -1205,7 +1270,7 @@ export const POST = api(async ({ req, params, deps }) => {
   // O tipo vem do próprio File (nunca de um campo do formulário); o serviço também valida.
   if (!IMAGE_TYPES.has(file.type)) throw new DomainError("Formato de imagem não suportado (use PNG, JPEG ou WebP)");
   if (file.size === 0) throw new DomainError("O arquivo está vazio");
-  if (file.size > MAX_IMAGE_BYTES) throw new DomainError("Imagem maior que 10 MB"); // antes de ler para a memória
+  if (file.size > MAX_IMAGE_BYTES) throw new DomainError("Imagem maior que 10 MB"); // depois do parse: o arquivo já está em memória; o limite é por tamanho real, não pelo cabeçalho
   const label = String(form.get("label") ?? "").trim();
   if (!label || label.length > 100) throw new DomainError("Dê um rótulo à imagem (ex.: produto, pessoa), com até 100 caracteres");
   return addReference(deps, {
