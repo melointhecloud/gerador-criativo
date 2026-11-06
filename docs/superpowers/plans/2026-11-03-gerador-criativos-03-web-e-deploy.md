@@ -718,14 +718,26 @@ git commit -m "feat(web): request context, api wrapper and range parser"
 ### Task 3: Endpoints da API
 
 **Files:**
-- Create: todos os `route.ts` abaixo
-- Test: `tests/web/api.test.ts`
+- Create: todos os `route.ts` abaixo, `src/web/login-throttle.ts`, `src/web/storage-errors.ts`
+- Test: `tests/web/api.test.ts`, `tests/web/login-throttle.test.ts`
+
+Regras desta task (aplicadas no código abaixo; o código foi executado e os testes passam):
+- Toda rota passa por `api()` com auth ligada; **só o login usa `auth: false`** (logout também exige sessão). O teste "nenhuma é pública" lista `src/app/api/**/route.ts` e exige 401 sem cookie em todo handler exportado, e que `GET` exista só nas 3 rotas de leitura.
+- Login: freio em memória (`src/web/login-throttle.ts`: 10 falhas em 15 min viram 429 com `Retry-After`; sucesso zera; atraso de 300 ms após falha, `loginThrottle.failDelayMs = 0` nos testes). Contador global (1 réplica); um atacante pode travar o login por 15 min, aceito.
+- Arquivos: `FILE_HEADERS`, `Content-Type` do registro, 416 com `Content-Range: bytes */N`, objeto ausente no storage vira 404 (`isMissingObject`), chave de storage nunca sai na resposta. Lê o objeto inteiro e fatia o Buffer (poucos MB).
+- Upload: tipo vem de `File.type` (whitelist), `file.size` checado antes de ler o corpo, rótulo obrigatório.
+- `params` chega como `Record<string, string>` (o `api()` resolve a Promise do Next); `noUncheckedIndexedAccess` está desligado, então `params.id` é `string`.
+- `tests/web/api.test.ts` usa `readdirSync` + `import()` (não `import.meta.glob`: `vite/client` não é dependência direta).
 
 - [ ] **Step 1: Escrever os testes de integração dos endpoints**
 
 `tests/web/api.test.ts`:
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readdirSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createSession, SESSION_COOKIE } from "@/auth/session";
 import { loadEnv } from "@/config/env";
 import { getContext, setContextForTests } from "@/web/context";
@@ -734,6 +746,10 @@ import * as projectsRoute from "@/app/api/projects/route";
 import * as projectRoute from "@/app/api/projects/[id]/route";
 import * as stageRoute from "@/app/api/projects/[id]/stage/route";
 import * as assetRoute from "@/app/api/assets/[assetId]/route";
+import * as logout from "@/app/api/auth/logout/route";
+import * as referencesRoute from "@/app/api/projects/[id]/references/route";
+import { FsStorage } from "@/storage/fs";
+import { loginThrottle } from "@/web/login-throttle";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb } from "../helpers/db";
 import { seedAsset, seedProject } from "../helpers/seed";
@@ -754,6 +770,8 @@ beforeEach(async () => {
   const m = await makeDeps();
   cleanup = m.cleanup;
   setContextForTests({ env, deps: m.deps });
+  loginThrottle.reset();
+  loginThrottle.failDelayMs = 0;
   cookie = `${SESSION_COOKIE}=${await createSession(env.SESSION_SECRET)}`;
 });
 afterEach(async () => {
@@ -794,9 +812,72 @@ describe("auth", () => {
     const setCookie = ok.headers.get("set-cookie")!;
     expect(setCookie).toContain(`${SESSION_COOKIE}=`);
     expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Lax");
+    expect(setCookie).toContain("Path=/");
+    expect(setCookie).toContain("Max-Age=");
+    expect((await bad.json()).error).toBe("Senha incorreta");
 
     const sessionCookie = setCookie.split(";")[0]!;
     expect((await call(projectsRoute.GET, { cookie: sessionCookie })).status).toBe(200);
+  });
+});
+
+describe("auth: freio e logout", () => {
+  it("após 10 falhas responde 429 com Retry-After, mesmo com a senha certa; sucesso antes disso zera", async () => {
+    const login_ = (password: string) => call(login.POST, { method: "POST", body: { password }, cookie: null });
+    for (let i = 0; i < 9; i++) expect((await login_("errada")).status).toBe(401);
+    expect((await login_("segredo")).status).toBe(200); // zera
+    for (let i = 0; i < 10; i++) expect((await login_("errada")).status).toBe(401);
+    const blocked = await login_("segredo");
+    expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect((await blocked.json()).error).toContain("Muitas tentativas");
+  });
+
+  it("logout (POST, autenticado) limpa o cookie", async () => {
+    const res = await call(logout.POST, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect((await call(logout.POST, { method: "POST", cookie: null })).status).toBe(401);
+  });
+});
+
+describe("rotas: nenhuma é pública", () => {
+  const API_DIR = path.resolve(process.cwd(), "src/app/api");
+  const modules: Record<string, () => Promise<unknown>> = {};
+  for (const rel of readdirSync(API_DIR, { recursive: true, encoding: "utf8" })) {
+    if (path.basename(rel) === "route.ts") modules[rel] = () => import(/* @vite-ignore */ path.join(API_DIR, rel));
+  }
+  const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+  it("todo handler exportado rejeita requisição sem sessão (401); só o login fica de fora", async () => {
+    const paths = Object.keys(modules);
+    expect(paths.length).toBeGreaterThanOrEqual(19);
+    let checked = 0;
+    for (const file of paths) {
+      if (file.startsWith("auth/login/")) continue;
+      const mod = (await modules[file]!()) as Record<string, unknown>;
+      const exported = Object.keys(mod).filter((k) => METHODS.includes(k));
+      expect(exported.length, file).toBeGreaterThan(0);
+      const params = Object.fromEntries(
+        [...file.matchAll(/\[(\w+)\]/g)].map((m) => [m[1]!, "00000000-0000-0000-0000-000000000000"]),
+      );
+      for (const m of exported) {
+        const res = await call(mod[m] as Handler, { method: m, params, cookie: null, body: m === "GET" ? undefined : {} });
+        expect(res.status, `${m} ${file}`).toBe(401);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(20);
+  });
+
+  it("GET existe só nas rotas de leitura (sem efeitos colaterais)", async () => {
+    const withGet: string[] = [];
+    for (const file of Object.keys(modules)) {
+      const mod = (await modules[file]!()) as Record<string, unknown>;
+      if ("GET" in mod) withGet.push(file);
+    }
+    expect(withGet.sort()).toEqual(["assets/[assetId]/route.ts", "projects/[id]/route.ts", "projects/route.ts"]);
   });
 });
 
@@ -864,6 +945,103 @@ describe("arquivos", () => {
     const bad = await call(assetRoute.GET, { params: { assetId: asset.id }, headers: { range: "bytes=50-60" } });
     expect(bad.status).toBe(416);
   });
+
+  it("416 traz Content-Range */tamanho e cabeçalhos de arquivo; 404 sem linha ou sem objeto", async () => {
+    const { deps } = await getContext();
+    const p = await seedProject(testDb);
+    const asset = await seedAsset(testDb, p.id, { kind: "clip", storageKey: "x/c2.mp4" });
+    await deps.storage.put("x/c2.mp4", Buffer.from("0123456789"), "video/mp4");
+    const bad = await call(assetRoute.GET, { params: { assetId: asset.id }, headers: { range: "bytes=50-60" } });
+    expect(bad.headers.get("content-range")).toBe("bytes */10");
+    const ok = await call(assetRoute.GET, { params: { assetId: asset.id } });
+    expect(ok.headers.get("cache-control")).toContain("private");
+    expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
+
+    const noRow = await call(assetRoute.GET, { params: { assetId: "00000000-0000-0000-0000-000000000000" } });
+    expect(noRow.status).toBe(404);
+
+    const ghost = await seedAsset(testDb, p.id, { kind: "clip", storageKey: "x/ausente.mp4" });
+    const root = await mkdtemp(path.join(tmpdir(), "fs-"));
+    setContextForTests({ env, deps: { ...deps, storage: new FsStorage(root) } });
+    const miss = await call(assetRoute.GET, { params: { assetId: ghost.id } });
+    expect(miss.status).toBe(404);
+    const body = await miss.json();
+    expect(body.error).toBe("Arquivo não encontrado");
+    expect(JSON.stringify(body)).not.toContain("ausente");
+  });
+});
+
+describe("upload de referência", () => {
+  function upload(projectId: string, form: FormData) {
+    const headers: Record<string, string> = { cookie };
+    return referencesRoute.POST(new Request("http://test/", { method: "POST", headers, body: form }), {
+      params: Promise.resolve({ id: projectId }),
+    });
+  }
+  const png = () => new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" });
+
+  it("aceita imagem com rótulo; rejeita sem arquivo, sem rótulo, tipo errado e acima de 10 MB", async () => {
+    const p = await seedProject(testDb);
+    const f = new FormData();
+    f.set("file", png());
+    f.set("label", "produto");
+    f.set("mimeType", "text/html"); // campo do cliente é ignorado
+    const ok = await upload(p.id, f);
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).mimeType).toBe("image/png");
+
+    const none = new FormData();
+    none.set("label", "x");
+    expect((await upload(p.id, none)).status).toBe(400);
+
+    const nolabel = new FormData();
+    nolabel.set("file", png());
+    nolabel.set("label", "  ");
+    expect((await upload(p.id, nolabel)).status).toBe(400);
+
+    const wrong = new FormData();
+    wrong.set("file", new File(["<html>"], "a.html", { type: "text/html" }));
+    wrong.set("label", "y");
+    expect((await upload(p.id, wrong)).status).toBe(400);
+
+    const big = new FormData();
+    big.set("file", new File([new Uint8Array(10 * 1024 * 1024 + 1)], "b.png", { type: "image/png" }));
+    big.set("label", "z");
+    const res = await upload(p.id, big);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("10 MB");
+  });
+});
+```
+
+`tests/web/login-throttle.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { createLoginThrottle } from "@/web/login-throttle";
+
+describe("login throttle", () => {
+  it("bloqueia após 10 falhas na janela e libera quando ela expira", () => {
+    let t = 1000;
+    const th = createLoginThrottle({ now: () => t });
+    for (let i = 0; i < 9; i++) th.fail();
+    expect(th.check().blocked).toBe(false);
+    th.fail();
+    const r = th.check();
+    expect(r.blocked).toBe(true);
+    if (r.blocked) expect(r.retryAfterS).toBe(900);
+    t += 15 * 60 * 1000 - 1;
+    expect(th.check().blocked).toBe(true);
+    t += 1;
+    expect(th.check().blocked).toBe(false);
+  });
+
+  it("sucesso zera o contador", () => {
+    const th = createLoginThrottle({ now: () => 0 });
+    for (let i = 0; i < 9; i++) th.fail();
+    th.success();
+    for (let i = 0; i < 9; i++) th.fail();
+    expect(th.check().blocked).toBe(false);
+  });
 });
 ```
 
@@ -872,7 +1050,65 @@ describe("arquivos", () => {
 Run: `pnpm vitest run tests/web/api.test.ts`
 Expected: FAIL — rotas não encontradas.
 
-- [ ] **Step 3: Criar os endpoints de auth**
+- [ ] **Step 3: Criar o freio de login, o detector de objeto ausente e os endpoints**
+
+`src/web/login-throttle.ts`:
+```ts
+// Freio simples de tentativas de login, em memória (o serviço `web` roda com 1 réplica).
+// Contador global (não por IP): X-Forwarded-For é forjável e o time é pequeno. Um atacante pode, no pior caso,
+// travar o login por 15 min; isso é aceito em troca de impedir força bruta.
+export type Throttle = {
+  failDelayMs: number;
+  check(): { blocked: false } | { blocked: true; retryAfterS: number };
+  fail(): void;
+  success(): void;
+  reset(): void;
+};
+
+export function createLoginThrottle(opts: { max?: number; windowMs?: number; now?: () => number; failDelayMs?: number } = {}): Throttle {
+  const max = opts.max ?? 10;
+  const windowMs = opts.windowMs ?? 15 * 60 * 1000;
+  const now = opts.now ?? Date.now;
+  let count = 0;
+  let windowStart = 0;
+
+  const expire = () => {
+    if (count > 0 && now() - windowStart >= windowMs) count = 0;
+  };
+
+  return {
+    failDelayMs: opts.failDelayMs ?? 300,
+    check() {
+      expire();
+      if (count >= max) return { blocked: true, retryAfterS: Math.max(1, Math.ceil((windowStart + windowMs - now()) / 1000)) };
+      return { blocked: false };
+    },
+    fail() {
+      expire();
+      if (count === 0) windowStart = now();
+      count += 1;
+    },
+    success() {
+      count = 0;
+    },
+    reset() {
+      count = 0;
+    },
+  };
+}
+
+export const loginThrottle: Throttle = createLoginThrottle();
+```
+
+`src/web/storage-errors.ts`:
+```ts
+// Objeto ausente no storage: ENOENT (FsStorage) ou NoSuchKey/404 (S3). Vira 404 em vez de 500.
+export function isMissingObject(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const x = e as { code?: unknown; name?: unknown; $metadata?: { httpStatusCode?: number } };
+  return x.code === "ENOENT" || x.code === "NoSuchKey" || x.name === "NoSuchKey" || x.name === "NotFound" || x.$metadata?.httpStatusCode === 404;
+}
+```
 
 `src/app/api/auth/login/route.ts`:
 ```ts
@@ -880,19 +1116,35 @@ import { z } from "zod";
 import { createSession, passwordMatches, SESSION_COOKIE, SESSION_MAX_AGE_S } from "@/auth/session";
 import { DomainError } from "@/services/errors";
 import { api } from "@/web/http";
+import { loginThrottle } from "@/web/login-throttle";
 
+// Única rota sem sessão. Mensagem de erro genérica: não revela nada além de "senha incorreta".
 export const POST = api(
   async ({ req, env }) => {
-    const { password } = z.object({ password: z.string() }).parse(await req.json());
+    const blocked = loginThrottle.check();
+    if (blocked.blocked) {
+      return Response.json(
+        { error: "Muitas tentativas. Tente novamente em alguns minutos." },
+        { status: 429, headers: { "Retry-After": String(blocked.retryAfterS), "Cache-Control": "private, no-store" } },
+      );
+    }
+    const { password } = z.object({ password: z.string().max(500) }).parse(await req.json());
     if (!(await passwordMatches(password, env.ACCESS_PASSWORD))) {
-      await new Promise((r) => setTimeout(r, 500)); // freia tentativas em sequência
+      loginThrottle.fail();
+      if (loginThrottle.failDelayMs > 0) await new Promise((r) => setTimeout(r, loginThrottle.failDelayMs));
       throw new DomainError("Senha incorreta", 401);
     }
+    loginThrottle.success();
     const token = await createSession(env.SESSION_SECRET);
     const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
     return Response.json(
       { ok: true },
-      { headers: { "set-cookie": `${SESSION_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_S}${secure}` } },
+      {
+        headers: {
+          "Cache-Control": "private, no-store",
+          "set-cookie": `${SESSION_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_S}${secure}`,
+        },
+      },
     );
   },
   { auth: false },
@@ -904,27 +1156,75 @@ export const POST = api(
 import { SESSION_COOKIE } from "@/auth/session";
 import { api } from "@/web/http";
 
-export const POST = api(
-  async () =>
-    Response.json({ ok: true }, { headers: { "set-cookie": `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0` } }),
-  { auth: false },
-);
+export const POST = api(async () => {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return Response.json(
+    { ok: true },
+    { headers: { "set-cookie": `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure}` } },
+  );
+});
 ```
 
-- [ ] **Step 4: Criar os endpoints de projeto**
-
-`src/app/api/projects/route.ts`:
+`src/app/api/projects/[id]/assemble/route.ts`:
 ```ts
-import { z } from "zod";
-import { MODES } from "@/domain/stages";
-import { createProject, listProjects } from "@/services/projects";
+import { startAssembly } from "@/services/scenes";
 import { api } from "@/web/http";
 
-export const GET = api(async ({ deps }) => ({ projects: await listProjects(deps.db) }));
+export const POST = api(async ({ params, deps }) => {
+  await startAssembly(deps.db, params.id);
+  return { ok: true };
+});
+```
 
-export const POST = api(async ({ req, deps }) => {
-  const body = z.object({ name: z.string(), mode: z.enum(MODES) }).parse(await req.json());
-  return createProject(deps.db, body);
+`src/app/api/projects/[id]/generate/route.ts`:
+```ts
+import { generateAllScenes } from "@/services/scenes";
+import { api } from "@/web/http";
+
+export const POST = api(async ({ params, deps }) => {
+  await generateAllScenes(deps, params.id);
+  return { ok: true };
+});
+```
+
+`src/app/api/projects/[id]/references/route.ts`:
+```ts
+import { DomainError } from "@/services/errors";
+import { addReference } from "@/services/projects";
+import { api } from "@/web/http";
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+export const POST = api(async ({ req, params, deps }) => {
+  const form = await req.formData().catch(() => {
+    throw new DomainError("Envie o formulário com uma imagem");
+  });
+  const file = form.get("file");
+  if (!(file instanceof File)) throw new DomainError("Envie um arquivo de imagem");
+  // O tipo vem do próprio File (nunca de um campo do formulário); o serviço também valida.
+  if (!IMAGE_TYPES.has(file.type)) throw new DomainError("Formato de imagem não suportado (use PNG, JPEG ou WebP)");
+  if (file.size === 0) throw new DomainError("O arquivo está vazio");
+  if (file.size > MAX_IMAGE_BYTES) throw new DomainError("Imagem maior que 10 MB"); // antes de ler para a memória
+  const label = String(form.get("label") ?? "").trim();
+  if (!label || label.length > 100) throw new DomainError("Dê um rótulo à imagem (ex.: produto, pessoa), com até 100 caracteres");
+  return addReference(deps, {
+    projectId: params.id,
+    label,
+    bytes: Buffer.from(await file.arrayBuffer()),
+    mimeType: file.type,
+  });
+});
+```
+
+`src/app/api/projects/[id]/regenerate-all/route.ts`:
+```ts
+import { regenerateAllScenes } from "@/services/scenes";
+import { api } from "@/web/http";
+
+export const POST = api(async ({ params, deps }) => {
+  await regenerateAllScenes(deps, params.id);
+  return { ok: true };
 });
 ```
 
@@ -941,8 +1241,21 @@ export const GET = api(async ({ params, deps }) => {
 });
 
 export const PATCH = api(async ({ req, params, deps }) => {
-  const body = z.object({ name: z.string().optional(), copy: z.string().optional() }).parse(await req.json());
+  const body = z.object({ name: z.string().max(200).optional(), copy: z.string().max(20000).optional() }).parse(await req.json());
   return updateBriefing(deps.db, params.id, body);
+});
+```
+
+`src/app/api/projects/[id]/script/plan/route.ts`:
+```ts
+import { z } from "zod";
+import { planProjectScript } from "@/services/scenes";
+import { api } from "@/web/http";
+
+export const POST = api(async ({ req, params, deps }) => {
+  const body = z.object({ feedback: z.string().max(5000).optional() }).parse(await req.json().catch(() => ({})));
+  await planProjectScript(deps, params.id, body.feedback);
+  return { ok: true };
 });
 ```
 
@@ -965,101 +1278,62 @@ export const POST = api(async ({ req, params, deps }) => {
 });
 ```
 
-`src/app/api/projects/[id]/references/route.ts`:
-```ts
-import { DomainError } from "@/services/errors";
-import { addReference } from "@/services/projects";
-import { api } from "@/web/http";
-
-export const POST = api(async ({ req, params, deps }) => {
-  const form = await req.formData();
-  const file = form.get("file");
-  if (!(file instanceof File)) throw new DomainError("Envie um arquivo de imagem");
-  return addReference(deps, {
-    projectId: params.id,
-    label: String(form.get("label") ?? ""),
-    bytes: Buffer.from(await file.arrayBuffer()),
-    mimeType: file.type,
-  });
-});
-```
-
-`src/app/api/projects/[id]/generate/route.ts`:
-```ts
-import { generateAllScenes } from "@/services/scenes";
-import { api } from "@/web/http";
-
-export const POST = api(async ({ params, deps }) => {
-  await generateAllScenes(deps, params.id);
-  return { ok: true };
-});
-```
-
-`src/app/api/projects/[id]/regenerate-all/route.ts`:
-```ts
-import { regenerateAllScenes } from "@/services/scenes";
-import { api } from "@/web/http";
-
-export const POST = api(async ({ params, deps }) => {
-  await regenerateAllScenes(deps, params.id);
-  return { ok: true };
-});
-```
-
-`src/app/api/projects/[id]/assemble/route.ts`:
-```ts
-import { startAssembly } from "@/services/scenes";
-import { api } from "@/web/http";
-
-export const POST = api(async ({ params, deps }) => {
-  await startAssembly(deps.db, params.id);
-  return { ok: true };
-});
-```
-
-`src/app/api/projects/[id]/script/plan/route.ts`:
+`src/app/api/projects/route.ts`:
 ```ts
 import { z } from "zod";
-import { planProjectScript } from "@/services/scenes";
+import { MODES } from "@/domain/stages";
+import { createProject, listProjects } from "@/services/projects";
 import { api } from "@/web/http";
 
-export const POST = api(async ({ req, params, deps }) => {
-  const body = z.object({ feedback: z.string().optional() }).parse(await req.json().catch(() => ({})));
-  await planProjectScript(deps, params.id, body.feedback);
-  return { ok: true };
+export const GET = api(async ({ deps }) => ({ projects: await listProjects(deps.db) }));
+
+export const POST = api(async ({ req, deps }) => {
+  const body = z.object({ name: z.string().max(200), mode: z.enum(MODES) }).parse(await req.json());
+  return createProject(deps.db, body);
 });
 ```
-
-- [ ] **Step 5: Criar os endpoints de arquivos, personagens e cenas**
 
 `src/app/api/assets/[assetId]/route.ts`:
 ```ts
+import { DomainError } from "@/services/errors";
 import { getAsset, removeReference } from "@/services/projects";
-import { api } from "@/web/http";
+import { FILE_HEADERS, api } from "@/web/http";
 import { parseRange } from "@/web/range";
+import { isMissingObject } from "@/web/storage-errors";
 
+const EXT: Record<string, string> = { "video/mp4": "mp4", "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
+
+// Lê o objeto inteiro e fatia o Buffer (o Storage não tem leitura parcial). Os arquivos têm poucos MB;
+// se isso crescer, trocar por leitura em stream com range.
 export const GET = api(async ({ req, params, deps }) => {
   const asset = await getAsset(deps.db, params.assetId);
-  const bytes = await deps.storage.get(asset.storageKey);
+  let bytes: Buffer;
+  try {
+    bytes = await deps.storage.get(asset.storageKey);
+  } catch (e) {
+    if (isMissingObject(e)) throw new DomainError("Arquivo não encontrado", 404);
+    throw e;
+  }
   const headers = new Headers({
-    "content-type": asset.mimeType,
-    "accept-ranges": "bytes",
-    "cache-control": "private, max-age=3600",
+    ...FILE_HEADERS,
+    "Content-Type": asset.mimeType,
+    "Accept-Ranges": "bytes",
   });
   if (new URL(req.url).searchParams.get("download")) {
-    headers.set("content-disposition", `attachment; filename="criativo-${asset.id.slice(0, 8)}.mp4"`);
+    headers.set("Content-Disposition", `attachment; filename="criativo-${asset.id.slice(0, 8)}.${EXT[asset.mimeType] ?? "bin"}"`);
   }
 
   const range = parseRange(req.headers.get("range"), bytes.length);
   if (range === "invalid") {
-    return new Response(null, { status: 416, headers: { "content-range": `bytes */${bytes.length}` } });
+    headers.set("Content-Range", `bytes */${bytes.length}`);
+    return new Response(null, { status: 416, headers });
   }
   if (range) {
-    headers.set("content-range", `bytes ${range.start}-${range.end}/${bytes.length}`);
-    headers.set("content-length", String(range.end - range.start + 1));
+    headers.set("Content-Range", `bytes ${range.start}-${range.end}/${bytes.length}`);
+    headers.set("Content-Length", String(range.end - range.start + 1));
     return new Response(new Uint8Array(bytes.subarray(range.start, range.end + 1)), { status: 206, headers });
   }
-  headers.set("content-length", String(bytes.length));
+  headers.set("Content-Length", String(bytes.length));
   return new Response(new Uint8Array(bytes), { headers });
 });
 
@@ -1070,15 +1344,41 @@ export const DELETE = api(async ({ params, deps }) => {
 });
 ```
 
-`src/app/api/projects/[id]/characters/route.ts`:
+`src/app/api/characters/[id]/approve/route.ts`:
 ```ts
-import { z } from "zod";
-import { addCharacter } from "@/services/characters";
+import { approveCharacter } from "@/services/characters";
 import { api } from "@/web/http";
 
-export const POST = api(async ({ req, params, deps }) => {
-  const body = z.object({ name: z.string(), description: z.string() }).parse(await req.json());
-  return addCharacter(deps, params.id, body);
+export const POST = api(async ({ params, deps }) => approveCharacter(deps.db, params.id));
+```
+
+`src/app/api/characters/[id]/regenerate/route.ts`:
+```ts
+import { regenerateCharacterImage } from "@/services/characters";
+import { api } from "@/web/http";
+
+export const POST = api(async ({ params, deps }) => {
+  await regenerateCharacterImage(deps, params.id);
+  return { ok: true };
+});
+```
+
+`src/app/api/characters/[id]/route.ts`:
+```ts
+import { z } from "zod";
+import { removeCharacter, updateCharacter } from "@/services/characters";
+import { api } from "@/web/http";
+
+export const PATCH = api(async ({ req, params, deps }) => {
+  const body = z
+    .object({ name: z.string().max(200).optional(), description: z.string().max(5000).optional() })
+    .parse(await req.json());
+  return updateCharacter(deps, params.id, body);
+});
+
+export const DELETE = api(async ({ params, deps }) => {
+  await removeCharacter(deps.db, params.id);
+  return { ok: true };
 });
 ```
 
@@ -1093,69 +1393,15 @@ export const POST = api(async ({ params, deps }) => {
 });
 ```
 
-`src/app/api/characters/[id]/route.ts`:
+`src/app/api/projects/[id]/characters/route.ts`:
 ```ts
 import { z } from "zod";
-import { removeCharacter, updateCharacter } from "@/services/characters";
-import { api } from "@/web/http";
-
-export const PATCH = api(async ({ req, params, deps }) => {
-  const body = z.object({ name: z.string().optional(), description: z.string().optional() }).parse(await req.json());
-  return updateCharacter(deps, params.id, body);
-});
-
-export const DELETE = api(async ({ params, deps }) => {
-  await removeCharacter(deps.db, params.id);
-  return { ok: true };
-});
-```
-
-`src/app/api/characters/[id]/regenerate/route.ts`:
-```ts
-import { regenerateCharacterImage } from "@/services/characters";
-import { api } from "@/web/http";
-
-export const POST = api(async ({ params, deps }) => {
-  await regenerateCharacterImage(deps, params.id);
-  return { ok: true };
-});
-```
-
-`src/app/api/characters/[id]/approve/route.ts`:
-```ts
-import { approveCharacter } from "@/services/characters";
-import { api } from "@/web/http";
-
-export const POST = api(async ({ params, deps }) => approveCharacter(deps.db, params.id));
-```
-
-`src/app/api/scenes/[id]/route.ts`:
-```ts
-import { z } from "zod";
-import { updateScene } from "@/services/scenes";
-import { api } from "@/web/http";
-
-export const PATCH = api(async ({ req, params, deps }) => {
-  const body = z
-    .object({
-      dialogue: z.string().optional(),
-      visualPrompt: z.string().optional(),
-      targetSeconds: z.number().optional(),
-    })
-    .parse(await req.json());
-  return updateScene(deps.db, params.id, body, deps.config.sceneMaxSeconds);
-});
-```
-
-`src/app/api/scenes/[id]/regenerate/route.ts`:
-```ts
-import { z } from "zod";
-import { regenerateScene } from "@/services/scenes";
+import { addCharacter } from "@/services/characters";
 import { api } from "@/web/http";
 
 export const POST = api(async ({ req, params, deps }) => {
-  const body = z.object({ prompt: z.string().optional() }).parse(await req.json().catch(() => ({})));
-  return regenerateScene(deps, params.id, body.prompt);
+  const body = z.object({ name: z.string().max(200), description: z.string().max(5000) }).parse(await req.json());
+  return addCharacter(deps, params.id, body);
 });
 ```
 
@@ -1171,15 +1417,45 @@ export const POST = api(async ({ req, params, deps }) => {
 });
 ```
 
-- [ ] **Step 6: Rodar e ver passar**
+`src/app/api/scenes/[id]/regenerate/route.ts`:
+```ts
+import { z } from "zod";
+import { regenerateScene } from "@/services/scenes";
+import { api } from "@/web/http";
+
+export const POST = api(async ({ req, params, deps }) => {
+  const body = z.object({ prompt: z.string().max(5000).optional() }).parse(await req.json().catch(() => ({})));
+  return regenerateScene(deps, params.id, body.prompt);
+});
+```
+
+`src/app/api/scenes/[id]/route.ts`:
+```ts
+import { z } from "zod";
+import { updateScene } from "@/services/scenes";
+import { api } from "@/web/http";
+
+export const PATCH = api(async ({ req, params, deps }) => {
+  const body = z
+    .object({
+      dialogue: z.string().max(5000).optional(),
+      visualPrompt: z.string().max(5000).optional(),
+      targetSeconds: z.number().int().optional(),
+    })
+    .parse(await req.json());
+  return updateScene(deps.db, params.id, body, deps.config.sceneMaxSeconds);
+});
+```
+
+- [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/web && pnpm typecheck`
 Expected: todos PASS; typecheck limpo. Se o typecheck reclamar de `Buffer`/`BodyInit`, manter os `new Uint8Array(...)` das respostas (já aplicados).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/app/api tests/web/api.test.ts
+git add src/app/api src/web tests/web docs
 git commit -m "feat(api): authenticated endpoints for the whole creative flow"
 ```
 
