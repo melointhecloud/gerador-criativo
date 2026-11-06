@@ -47,7 +47,7 @@
 ```ts
 import { describe, expect, it } from "vitest";
 import path from "node:path";
-import { makeTestClip, probe, withTempDir } from "@/modules/ffmpeg";
+import { makeTestClip, probe, runFfmpeg, withTempDir } from "@/modules/ffmpeg";
 
 describe("ffmpeg helpers", () => {
   it("gera um clipe vertical com áudio e mede duração e resolução", async () => {
@@ -74,6 +74,19 @@ describe("ffmpeg helpers", () => {
   it("probe falha em arquivo inválido", async () => {
     await withTempDir(async (dir) => {
       await expect(probe(path.join(dir, "nao-existe.mp4"))).rejects.toThrow();
+    });
+  });
+
+  it("runFfmpeg interrompe o processo e falha em pt-BR ao estourar o tempo limite", async () => {
+    await withTempDir(async (dir) => {
+      const t0 = Date.now();
+      await expect(
+        runFfmpeg(["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=600", "-f", "null", "-"], {
+          timeoutMs: 50,
+        }),
+      ).rejects.toThrow(/excedeu o tempo limite/);
+      expect(Date.now() - t0).toBeLessThan(5000);
+      void dir;
     });
   });
 
@@ -104,12 +117,26 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
-export async function runFfmpeg(args: string[]): Promise<void> {
+// Um ffmpeg travado ocuparia um slot do worker para sempre; o execFile mata o processo no limite.
+export const FFMPEG_TIMEOUT_MS = 10 * 60_000;
+export const PROBE_TIMEOUT_MS = 60_000;
+
+function isTimeout(e: unknown): boolean {
+  const err = e as { killed?: boolean; signal?: string | null };
+  return err.killed === true || err.signal === "SIGTERM";
+}
+
+export async function runFfmpeg(args: string[], opts: { timeoutMs?: number } = {}): Promise<void> {
+  const timeout = opts.timeoutMs ?? FFMPEG_TIMEOUT_MS;
   try {
     await exec("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args], {
       maxBuffer: 10 * 1024 * 1024,
+      timeout,
     });
   } catch (e) {
+    if (isTimeout(e)) {
+      throw new Error(`O ffmpeg excedeu o tempo limite (${Math.round(timeout / 60_000)} min) e foi interrompido.`);
+    }
     const stderr = (e as { stderr?: string }).stderr;
     throw new Error(`ffmpeg falhou: ${stderr || (e as Error).message}`);
   }
@@ -118,9 +145,17 @@ export async function runFfmpeg(args: string[]): Promise<void> {
 export type Probe = { durationSeconds: number; hasAudio: boolean; width: number; height: number };
 
 export async function probe(file: string): Promise<Probe> {
-  const { stdout } = await exec("ffprobe", [
-    "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file,
-  ]);
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      "ffprobe",
+      ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file],
+      { timeout: PROBE_TIMEOUT_MS },
+    ));
+  } catch (e) {
+    if (isTimeout(e)) throw new Error("O ffprobe excedeu o tempo limite (1 min) e foi interrompido.");
+    throw e;
+  }
   const j = JSON.parse(stdout) as {
     format: { duration?: string };
     streams: { codec_type: string; width?: number; height?: number }[];
@@ -165,7 +200,7 @@ export async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `pnpm vitest run tests/modules/ffmpeg.test.ts`
-Expected: 4 testes PASS.
+Expected: 5 testes PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -2972,10 +3007,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { jobs } from "@/db/schema";
 import { PermanentError, RetryLater } from "@/queue/errors";
-import { claim, enqueue } from "@/queue/queue";
+import { claim, complete, enqueue } from "@/queue/queue";
 import { ProviderError } from "@/providers/types";
 import { recoverStaleJobs, runOnce, type Handlers } from "@/worker/runner";
 import { resetDb, testDb as db } from "../helpers/db";
+
+// complete delega ao real; os testes de retry fazem as próximas chamadas falharem.
+vi.mock("@/queue/queue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/queue/queue")>();
+  return { ...actual, complete: vi.fn(actual.complete) };
+});
 
 beforeEach(resetDb);
 
@@ -2992,6 +3033,36 @@ describe("runOnce", () => {
     expect(await runOnce(db, { assemble: { run } })).toBe(true);
     expect(run).toHaveBeenCalledWith({ projectId: "p1" });
     expect((await jobOf(j.id)).status).toBe("done");
+  });
+
+  it("complete que falha uma vez é repetido: job termina done, handler roda uma vez e sem onDead", async () => {
+    const run = vi.fn(async () => {});
+    const onDead = vi.fn(async () => {});
+    const j = await enqueue(db, "assemble", {});
+    vi.mocked(complete).mockRejectedValueOnce(new Error("banco indisponível"));
+    await runOnce(db, { assemble: { run, onDead } }, { completeRetryDelayMs: 1 });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onDead).not.toHaveBeenCalled();
+    expect((await jobOf(j.id)).status).toBe("done");
+  });
+
+  it("complete que falha nas 3 tentativas rejeita, sem onDead, e o job fica running", async () => {
+    const run = vi.fn(async () => {});
+    const onDead = vi.fn(async () => {});
+    const j = await enqueue(db, "assemble", {});
+    vi.mocked(complete).mockRejectedValue(new Error("banco indisponível"));
+    try {
+      await expect(runOnce(db, { assemble: { run, onDead } }, { completeRetryDelayMs: 1 })).rejects.toThrow(
+        /banco indisponível/,
+      );
+    } finally {
+      vi.mocked(complete).mockReset();
+      const real = await vi.importActual<typeof import("@/queue/queue")>("@/queue/queue");
+      vi.mocked(complete).mockImplementation(real.complete);
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onDead).not.toHaveBeenCalled();
+    expect((await jobOf(j.id)).status).toBe("running");
   });
 
   it("RetryLater devolve à fila sem consumir tentativa", async () => {
@@ -3132,8 +3203,31 @@ async function runOnDead(handlers: Handlers, job: Job, message: string): Promise
   }
 }
 
+// complete() é a última escrita de um job bem-sucedido: um soluço do banco não deve deixá-lo
+// `running` (e, com tentativas esgotadas, morto pelo reclaim). Se esgotar, relança: o job será
+// recuperado como órfão (handlers são idempotentes).
+async function completeWithRetry(db: Db, id: string, delayMs: number): Promise<void> {
+  const attempts = 3;
+  for (let i = 1; ; i++) {
+    try {
+      await complete(db, id);
+      return;
+    } catch (err) {
+      if (i >= attempts) {
+        console.error(`complete falhou ${attempts}x para o job ${id}:`, err);
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, delayMs * i));
+    }
+  }
+}
+
 // Executa no máximo um job. Devolve true se havia job (para o loop não dormir à toa).
-export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
+export async function runOnce(
+  db: Db,
+  handlers: Handlers,
+  opts: { completeRetryDelayMs?: number } = {},
+): Promise<boolean> {
   const job = await claim(db);
   if (!job) return false;
 
@@ -3158,7 +3252,7 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
   }
   // Fora do try: se o complete falhar (queda do banco), o job NÃO é tratado como falha do handler
   // (não reexecuta por engano); fica `running` e o recoverStaleJobs o devolve à fila.
-  await complete(db, job.id);
+  await completeWithRetry(db, job.id, opts.completeRetryDelayMs ?? 200);
   return true;
 }
 
@@ -3226,9 +3320,10 @@ async function createProviders(env: Env): Promise<Providers> {
   };
 }
 
-// Job `running` há mais que isso é considerado órfão. Jobs são curtos (a geração de vídeo usa
-// RetryLater); a montagem com ffmpeg é o mais longo e deve ficar bem abaixo deste limite.
-const STALE_AFTER_MS = 10 * 60_000;
+// Job `running` há mais que isso é considerado órfão. Deve superar com folga o timeout do ffmpeg
+// (FFMPEG_TIMEOUT_MS = 10 min) somado às transferências de/para o storage, senão uma montagem
+// lenta porém legítima seria reclamada e executada duas vezes.
+const STALE_AFTER_MS = 30 * 60_000;
 const RECLAIM_EVERY_MS = 60_000;
 const IDLE_POLL_MS = 2_000;
 
@@ -3288,7 +3383,7 @@ process.exit(0);
 - [ ] **Step 6: Rodar os testes do runner**
 
 Run: `pnpm vitest run tests/worker/runner.test.ts`
-Expected: 9 testes PASS.
+Expected: 11 testes PASS.
 
 - [ ] **Step 7: Commit**
 

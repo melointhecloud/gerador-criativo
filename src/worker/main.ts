@@ -21,9 +21,10 @@ async function createProviders(env: Env): Promise<Providers> {
   };
 }
 
-// Job `running` há mais que isso é considerado órfão. Jobs são curtos (a geração de vídeo usa
-// RetryLater); a montagem com ffmpeg é o mais longo e deve ficar bem abaixo deste limite.
-const STALE_AFTER_MS = 10 * 60_000;
+// Job `running` há mais que isso é considerado órfão. Deve superar com folga o timeout do ffmpeg
+// (FFMPEG_TIMEOUT_MS = 10 min) somado às transferências de/para o storage, senão uma montagem
+// lenta porém legítima seria reclamada e executada duas vezes.
+const STALE_AFTER_MS = 30 * 60_000;
 const RECLAIM_EVERY_MS = 60_000;
 const IDLE_POLL_MS = 2_000;
 

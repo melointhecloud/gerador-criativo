@@ -6,12 +6,26 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
-export async function runFfmpeg(args: string[]): Promise<void> {
+// Um ffmpeg travado ocuparia um slot do worker para sempre; o execFile mata o processo no limite.
+export const FFMPEG_TIMEOUT_MS = 10 * 60_000;
+export const PROBE_TIMEOUT_MS = 60_000;
+
+function isTimeout(e: unknown): boolean {
+  const err = e as { killed?: boolean; signal?: string | null };
+  return err.killed === true || err.signal === "SIGTERM";
+}
+
+export async function runFfmpeg(args: string[], opts: { timeoutMs?: number } = {}): Promise<void> {
+  const timeout = opts.timeoutMs ?? FFMPEG_TIMEOUT_MS;
   try {
     await exec("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args], {
       maxBuffer: 10 * 1024 * 1024,
+      timeout,
     });
   } catch (e) {
+    if (isTimeout(e)) {
+      throw new Error(`O ffmpeg excedeu o tempo limite (${Math.round(timeout / 60_000)} min) e foi interrompido.`);
+    }
     const stderr = (e as { stderr?: string }).stderr;
     throw new Error(`ffmpeg falhou: ${stderr || (e as Error).message}`);
   }
@@ -20,9 +34,17 @@ export async function runFfmpeg(args: string[]): Promise<void> {
 export type Probe = { durationSeconds: number; hasAudio: boolean; width: number; height: number };
 
 export async function probe(file: string): Promise<Probe> {
-  const { stdout } = await exec("ffprobe", [
-    "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file,
-  ]);
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      "ffprobe",
+      ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file],
+      { timeout: PROBE_TIMEOUT_MS },
+    ));
+  } catch (e) {
+    if (isTimeout(e)) throw new Error("O ffprobe excedeu o tempo limite (1 min) e foi interrompido.");
+    throw e;
+  }
   const j = JSON.parse(stdout) as {
     format: { duration?: string };
     streams: { codec_type: string; width?: number; height?: number }[];

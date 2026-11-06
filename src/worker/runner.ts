@@ -18,8 +18,31 @@ async function runOnDead(handlers: Handlers, job: Job, message: string): Promise
   }
 }
 
+// complete() é a última escrita de um job bem-sucedido: um soluço do banco não deve deixá-lo
+// `running` (e, com tentativas esgotadas, morto pelo reclaim). Se esgotar, relança: o job será
+// recuperado como órfão (handlers são idempotentes).
+async function completeWithRetry(db: Db, id: string, delayMs: number): Promise<void> {
+  const attempts = 3;
+  for (let i = 1; ; i++) {
+    try {
+      await complete(db, id);
+      return;
+    } catch (err) {
+      if (i >= attempts) {
+        console.error(`complete falhou ${attempts}x para o job ${id}:`, err);
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, delayMs * i));
+    }
+  }
+}
+
 // Executa no máximo um job. Devolve true se havia job (para o loop não dormir à toa).
-export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
+export async function runOnce(
+  db: Db,
+  handlers: Handlers,
+  opts: { completeRetryDelayMs?: number } = {},
+): Promise<boolean> {
   const job = await claim(db);
   if (!job) return false;
 
@@ -44,7 +67,7 @@ export async function runOnce(db: Db, handlers: Handlers): Promise<boolean> {
   }
   // Fora do try: se o complete falhar (queda do banco), o job NÃO é tratado como falha do handler
   // (não reexecuta por engano); fica `running` e o recoverStaleJobs o devolve à fila.
-  await complete(db, job.id);
+  await completeWithRetry(db, job.id, opts.completeRetryDelayMs ?? 200);
   return true;
 }
 

@@ -2,10 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { jobs } from "@/db/schema";
 import { PermanentError, RetryLater } from "@/queue/errors";
-import { claim, enqueue } from "@/queue/queue";
+import { claim, complete, enqueue } from "@/queue/queue";
 import { ProviderError } from "@/providers/types";
 import { recoverStaleJobs, runOnce, type Handlers } from "@/worker/runner";
 import { resetDb, testDb as db } from "../helpers/db";
+
+// complete delega ao real; os testes de retry fazem as próximas chamadas falharem.
+vi.mock("@/queue/queue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/queue/queue")>();
+  return { ...actual, complete: vi.fn(actual.complete) };
+});
 
 beforeEach(resetDb);
 
@@ -22,6 +28,36 @@ describe("runOnce", () => {
     expect(await runOnce(db, { assemble: { run } })).toBe(true);
     expect(run).toHaveBeenCalledWith({ projectId: "p1" });
     expect((await jobOf(j.id)).status).toBe("done");
+  });
+
+  it("complete que falha uma vez é repetido: job termina done, handler roda uma vez e sem onDead", async () => {
+    const run = vi.fn(async () => {});
+    const onDead = vi.fn(async () => {});
+    const j = await enqueue(db, "assemble", {});
+    vi.mocked(complete).mockRejectedValueOnce(new Error("banco indisponível"));
+    await runOnce(db, { assemble: { run, onDead } }, { completeRetryDelayMs: 1 });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onDead).not.toHaveBeenCalled();
+    expect((await jobOf(j.id)).status).toBe("done");
+  });
+
+  it("complete que falha nas 3 tentativas rejeita, sem onDead, e o job fica running", async () => {
+    const run = vi.fn(async () => {});
+    const onDead = vi.fn(async () => {});
+    const j = await enqueue(db, "assemble", {});
+    vi.mocked(complete).mockRejectedValue(new Error("banco indisponível"));
+    try {
+      await expect(runOnce(db, { assemble: { run, onDead } }, { completeRetryDelayMs: 1 })).rejects.toThrow(
+        /banco indisponível/,
+      );
+    } finally {
+      vi.mocked(complete).mockReset();
+      const real = await vi.importActual<typeof import("@/queue/queue")>("@/queue/queue");
+      vi.mocked(complete).mockImplementation(real.complete);
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onDead).not.toHaveBeenCalled();
+    expect((await jobOf(j.id)).status).toBe("running");
   });
 
   it("RetryLater devolve à fila sem consumir tentativa", async () => {
