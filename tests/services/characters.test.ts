@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { assets, characters, jobs, sceneReferences } from "@/db/schema";
+import { assets, characters, jobs, sceneReferences, scenes } from "@/db/schema";
 import { DomainError } from "@/services/errors";
 import { handleGenerateCharacter, onGenerateCharacterDead } from "@/modules/character-designer";
 import {
@@ -88,6 +88,38 @@ describe("CRUD", () => {
     await removeCharacter(db, c.id);
     expect(await db.select().from(characters)).toHaveLength(0);
     expect(await db.select().from(assets).where(eq(assets.id, img.id))).toHaveLength(0);
+  });
+
+  it("removeCharacter avisa as cenas que usavam o personagem e preserva avisos", async () => {
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const imgA = await seedAsset(db, p.id, { kind: "character", label: "Ana" });
+    const imgB = await seedAsset(db, p.id, { kind: "character", label: "Beto" });
+    const a = await seedCharacter(db, p.id, { name: "Ana", imageStatus: "ready", assetId: imgA.id });
+    const b = await seedCharacter(db, p.id, { name: "Beto", imageStatus: "ready", assetId: imgB.id });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [imgA.id, imgB.id] });
+    const s2 = await seedScene(db, p.id, 1, { assetIds: [imgB.id] });
+    const s3 = await seedScene(db, p.id, 2, {});
+    await db.update(scenes).set({ notice: "Cena cortada." }).where(eq(scenes.id, s1.id));
+    const notice = async (id: string) => (await db.select().from(scenes).where(eq(scenes.id, id)))[0]!.notice;
+    const msg = (n: string) => `A referência “${n}” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.`;
+
+    await removeCharacter(db, a.id);
+    expect(await notice(s1.id)).toBe(`Cena cortada. ${msg("Ana")}`);
+    expect(await notice(s2.id)).toBeNull();
+    expect(await notice(s3.id)).toBeNull();
+
+    await removeCharacter(db, b.id);
+    expect(await notice(s1.id)).toBe(`Cena cortada. ${msg("Ana")} ${msg("Beto")}`);
+    expect(await notice(s2.id)).toBe(msg("Beto"));
+    expect(await notice(s3.id)).toBeNull();
+  });
+
+  it("removeCharacter sem cenas não altera nada além do personagem", async () => {
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "A" });
+    const c = await seedCharacter(db, p.id, { name: "A", imageStatus: "ready", assetId: img.id });
+    await removeCharacter(db, c.id);
+    expect(await db.select().from(scenes)).toHaveLength(0);
   });
 
   it("regenerateCharacterImage volta para pending e enfileira", async () => {

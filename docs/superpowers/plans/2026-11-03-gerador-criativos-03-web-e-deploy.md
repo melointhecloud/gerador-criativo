@@ -735,6 +735,7 @@ Regras desta task (aplicadas no código abaixo; o código foi executado e os tes
 `tests/web/api.test.ts`:
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PNG_BYTES } from "../helpers/images";
 import { readdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -994,7 +995,7 @@ describe("upload de referência", () => {
       params: Promise.resolve({ id: projectId }),
     });
   }
-  const png = () => new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" });
+  const png = () => new File([new Uint8Array(PNG_BYTES)], "a.png", { type: "image/png" });
 
   it("aceita imagem com rótulo; rejeita sem arquivo, sem rótulo, tipo errado e acima de 10 MB", async () => {
     const p = await seedProject(testDb);
@@ -1014,6 +1015,13 @@ describe("upload de referência", () => {
     nolabel.set("file", png());
     nolabel.set("label", "  ");
     expect((await upload(p.id, nolabel)).status).toBe(400);
+
+    const fake = new FormData();
+    fake.set("file", new File(["só texto, 14b"], "a.png", { type: "image/png" }));
+    fake.set("label", "falso");
+    const fakeRes = await upload(p.id, fake);
+    expect(fakeRes.status).toBe(400);
+    expect((await fakeRes.json()).error).toBe("O arquivo não parece ser uma imagem PNG, JPEG ou WebP.");
 
     const wrong = new FormData();
     wrong.set("file", new File(["<html>"], "a.html", { type: "text/html" }));
@@ -1267,7 +1275,7 @@ export const POST = api(async ({ req, params, deps }) => {
   });
   const file = form.get("file");
   if (!(file instanceof File)) throw new DomainError("Envie um arquivo de imagem");
-  // O tipo vem do próprio File (nunca de um campo do formulário); o serviço também valida.
+  // O tipo vem do próprio File (nunca de um campo do formulário); o serviço também valida e confere a assinatura do arquivo (magic bytes).
   if (!IMAGE_TYPES.has(file.type)) throw new DomainError("Formato de imagem não suportado (use PNG, JPEG ou WebP)");
   if (file.size === 0) throw new DomainError("O arquivo está vazio");
   if (file.size > MAX_IMAGE_BYTES) throw new DomainError("Imagem maior que 10 MB"); // depois do parse: o arquivo já está em memória; o limite é por tamanho real, não pelo cabeçalho
@@ -2555,7 +2563,7 @@ Expected: os dois builds terminam sem erro; a última linha imprime `ffmpeg vers
 
 - [ ] **Step 5: Criar `README.md`**
 
-Conteúdo: o `README.md` do repositório (visão geral, execução local com providers falsos, testes, tabela de variáveis de ambiente conferida com `src/config/env.ts`, estado do provider Gemini, deploy no Railway com checklist, notas de segurança e operação).
+Conteúdo: o `README.md` do repositório (visão geral, execução local com providers falsos, testes, tabela de variáveis de ambiente conferida com `src/config/env.ts`, estado do provider Gemini, deploy no Railway com checklist, notas de segurança e operação; inclui as notas sobre arquivos órfãos no bucket, cookie `Secure` fora de `pnpm dev` e o texto de teste do modo fake).
 
 - [ ] **Step 6: Commit**
 

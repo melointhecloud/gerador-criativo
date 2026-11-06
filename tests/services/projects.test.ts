@@ -1,20 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { characters, projects, sceneAttempts } from "@/db/schema";
+import { assets, characters, projects, sceneAttempts, scenes } from "@/db/schema";
 import { DomainError } from "@/services/errors";
 import {
   addReference, advanceToReviewIfIdle, createProject, getSnapshot, removeReference, setStage, updateBriefing,
 } from "@/services/projects";
 import { enqueue, fail } from "@/queue/queue";
+import { JPEG_BYTES, PNG_BYTES, WEBP_BYTES } from "../helpers/images";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
-import { seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
+import { seedAsset, seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
 
 beforeEach(resetDb);
 let cleanup: () => Promise<void>;
 afterEach(async () => cleanup?.());
 
-const png = Buffer.from("png");
+const png = PNG_BYTES;
 
 describe("createProject / updateBriefing", () => {
   it("cria projeto em briefing e exige nome", async () => {
@@ -40,7 +41,7 @@ describe("referências", () => {
     const a = await addReference(m.deps, { projectId: p.id, label: "produto", bytes: png, mimeType: "image/png" });
     expect(a.kind).toBe("reference");
     expect(a.label).toBe("produto");
-    expect((await m.deps.storage.get(a.storageKey)).toString()).toBe("png");
+    expect((await m.deps.storage.get(a.storageKey)).equals(png)).toBe(true);
   });
 
   it("rejeita tipo de arquivo, rótulo vazio e rótulo repetido", async () => {
@@ -53,6 +54,42 @@ describe("referências", () => {
     await expect(addReference(m.deps, { projectId: p.id, label: "produto", bytes: png, mimeType: "image/jpeg" })).rejects.toThrow(/Já existe/);
   });
 
+  it("aceita PNG, JPEG e WebP e grava o tipo detectado", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db);
+    const cases: [Buffer, string, string][] = [
+      [png, "image/png", "png"], [JPEG_BYTES, "image/jpeg", "jpg"], [WEBP_BYTES, "image/webp", "webp"],
+    ];
+    for (const [i, [bytes, mime, ext]] of cases.entries()) {
+      const a = await addReference(m.deps, { projectId: p.id, label: `r${i}`, bytes, mimeType: mime });
+      expect(a.mimeType).toBe(mime);
+      expect(a.storageKey.endsWith(`.${ext}`)).toBe(true);
+    }
+  });
+
+  it("grava o tipo detectado quando o declarado difere (JPEG declarado como PNG)", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db);
+    const a = await addReference(m.deps, { projectId: p.id, label: "foto", bytes: JPEG_BYTES, mimeType: "image/png" });
+    expect(a.mimeType).toBe("image/jpeg");
+    expect(a.storageKey.endsWith(".jpg")).toBe(true);
+  });
+
+  it("rejeita arquivo que não é imagem mesmo declarado como PNG, e buffers vazios/truncados", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db);
+    for (const bytes of [Buffer.from("isto não é imagem"), Buffer.alloc(0), PNG_BYTES.subarray(0, 5), Buffer.from("RIFF1234WEB")]) {
+      const err = await addReference(m.deps, { projectId: p.id, label: "x", bytes, mimeType: "image/png" }).catch((e) => e);
+      expect(err).toBeInstanceOf(DomainError);
+      expect(err.status).toBe(400);
+      expect(err.message).toBe("O arquivo não parece ser uma imagem PNG, JPEG ou WebP.");
+    }
+    expect(await db.select().from(assets)).toHaveLength(0);
+  });
+
   it("remove referência no briefing", async () => {
     const m = await makeDeps();
     cleanup = m.cleanup;
@@ -60,6 +97,39 @@ describe("referências", () => {
     const a = await addReference(m.deps, { projectId: p.id, label: "produto", bytes: png, mimeType: "image/png" });
     await removeReference(db, a.id);
     expect((await getSnapshot(db, p.id)).references).toHaveLength(0);
+  });
+});
+
+describe("removeReference com cenas já planejadas", () => {
+  const sentence = (l: string) => `A referência “${l}” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.`;
+  const noticeOf = async (id: string) => (await db.select().from(scenes).where(eq(scenes.id, id)))[0]!.notice;
+
+  it("avisa só as cenas que usavam a imagem, preserva avisos e não repete frase", async () => {
+    const p = await seedProject(db);
+    const a = await seedAsset(db, p.id, { label: "produto" });
+    const b = await seedAsset(db, p.id, { label: "pessoa" });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [a.id, b.id] });
+    const s2 = await seedScene(db, p.id, 1, { assetIds: [b.id] });
+    const s3 = await seedScene(db, p.id, 2, { assetIds: [] });
+    await db.update(scenes).set({ notice: "Cena cortada." }).where(eq(scenes.id, s1.id));
+
+    await removeReference(db, a.id);
+    expect(await noticeOf(s1.id)).toBe(`Cena cortada. ${sentence("produto")}`);
+    expect(await noticeOf(s2.id)).toBeNull();
+    expect(await noticeOf(s3.id)).toBeNull();
+
+    await removeReference(db, b.id);
+    expect(await noticeOf(s1.id)).toBe(`Cena cortada. ${sentence("produto")} ${sentence("pessoa")}`);
+    expect(await noticeOf(s2.id)).toBe(sentence("pessoa"));
+    expect(await noticeOf(s3.id)).toBeNull();
+  });
+
+  it("sem cenas nada muda", async () => {
+    const p = await seedProject(db);
+    const a = await seedAsset(db, p.id, { label: "produto" });
+    await removeReference(db, a.id);
+    expect(await db.select().from(scenes)).toHaveLength(0);
+    expect(await db.select().from(assets)).toHaveLength(0);
   });
 });
 

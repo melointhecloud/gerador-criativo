@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import { PNG_BYTES } from "../helpers/images";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -37,7 +38,7 @@ async function ugcUntilGenerated(m: Awaited<ReturnType<typeof makeDeps>>) {
   const handlers = buildHandlers(m.deps);
   const p = await createProject(db, { name: "Flow", mode: "ugc" });
   await updateBriefing(db, p.id, { copy: "Copy do produto milagroso" });
-  await addReference(m.deps, { projectId: p.id, label: "produto", bytes: Buffer.from("png"), mimeType: "image/png" });
+  await addReference(m.deps, { projectId: p.id, label: "produto", bytes: PNG_BYTES, mimeType: "image/png" });
   await setStage(db, p.id, "script");
   await planProjectScript(m.deps, p.id);
   await generateAllScenes(m.deps, p.id);

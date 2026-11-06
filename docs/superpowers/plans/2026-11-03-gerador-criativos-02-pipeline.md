@@ -862,11 +862,25 @@ export async function assertLabelFree(db: DbOrTx, projectId: string, label: stri
 
 - [ ] **Step 4: Escrever os testes do serviço de projetos**
 
+O serviço confere a assinatura (magic bytes) do arquivo, não o tipo declarado pelo cliente; por isso os testes usam bytes de imagem reais. `tests/helpers/images.ts`:
+```ts
+import { PNG_1X1 } from "@/providers/fake";
+
+export const PNG_BYTES = PNG_1X1;
+// Cabeçalhos mínimos: o serviço só confere a assinatura (magic bytes).
+export const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00]);
+export const WEBP_BYTES = Buffer.concat([
+  Buffer.from("RIFF"), Buffer.from([0x1a, 0, 0, 0]), Buffer.from("WEBPVP8 "),
+]);
+```
+
+Cenas já planejadas: `removeReference` (aqui) e `removeCharacter` (Task 8) não apagam nem invalidam o roteiro; na mesma transação gravam em `scenes.notice` o aviso “A referência “<rótulo>” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.” nas cenas que usavam a imagem (sem repetir a mesma frase). A regeneração da imagem de um personagem reaponta `scene_references` para o novo asset (Task 8, handler), sem aviso.
+
 `tests/services/projects.test.ts`:
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { characters, projects, sceneAttempts } from "@/db/schema";
+import { assets, characters, projects, sceneAttempts, scenes } from "@/db/schema";
 import { DomainError } from "@/services/errors";
 import {
   addReference, advanceToReviewIfIdle, createProject, getSnapshot, removeReference, setStage, updateBriefing,
@@ -874,13 +888,14 @@ import {
 import { enqueue, fail } from "@/queue/queue";
 import { makeDeps } from "../helpers/deps";
 import { resetDb, testDb as db } from "../helpers/db";
-import { seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
+import { JPEG_BYTES, PNG_BYTES, WEBP_BYTES } from "../helpers/images";
+import { seedAsset, seedAttempt, seedCharacter, seedProject, seedScene } from "../helpers/seed";
 
 beforeEach(resetDb);
 let cleanup: () => Promise<void>;
 afterEach(async () => cleanup?.());
 
-const png = Buffer.from("png");
+const png = PNG_BYTES;
 
 describe("createProject / updateBriefing", () => {
   it("cria projeto em briefing e exige nome", async () => {
@@ -906,7 +921,7 @@ describe("referências", () => {
     const a = await addReference(m.deps, { projectId: p.id, label: "produto", bytes: png, mimeType: "image/png" });
     expect(a.kind).toBe("reference");
     expect(a.label).toBe("produto");
-    expect((await m.deps.storage.get(a.storageKey)).toString()).toBe("png");
+    expect((await m.deps.storage.get(a.storageKey)).equals(png)).toBe(true);
   });
 
   it("rejeita tipo de arquivo, rótulo vazio e rótulo repetido", async () => {
@@ -919,6 +934,42 @@ describe("referências", () => {
     await expect(addReference(m.deps, { projectId: p.id, label: "produto", bytes: png, mimeType: "image/jpeg" })).rejects.toThrow(/Já existe/);
   });
 
+  it("aceita PNG, JPEG e WebP e grava o tipo detectado", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db);
+    const cases: [Buffer, string, string][] = [
+      [png, "image/png", "png"], [JPEG_BYTES, "image/jpeg", "jpg"], [WEBP_BYTES, "image/webp", "webp"],
+    ];
+    for (const [i, [bytes, mime, ext]] of cases.entries()) {
+      const a = await addReference(m.deps, { projectId: p.id, label: `r${i}`, bytes, mimeType: mime });
+      expect(a.mimeType).toBe(mime);
+      expect(a.storageKey.endsWith(`.${ext}`)).toBe(true);
+    }
+  });
+
+  it("grava o tipo detectado quando o declarado difere (JPEG declarado como PNG)", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db);
+    const a = await addReference(m.deps, { projectId: p.id, label: "foto", bytes: JPEG_BYTES, mimeType: "image/png" });
+    expect(a.mimeType).toBe("image/jpeg");
+    expect(a.storageKey.endsWith(".jpg")).toBe(true);
+  });
+
+  it("rejeita arquivo que não é imagem mesmo declarado como PNG, e buffers vazios/truncados", async () => {
+    const m = await makeDeps();
+    cleanup = m.cleanup;
+    const p = await seedProject(db);
+    for (const bytes of [Buffer.from("isto não é imagem"), Buffer.alloc(0), PNG_BYTES.subarray(0, 5), Buffer.from("RIFF1234WEB")]) {
+      const err = await addReference(m.deps, { projectId: p.id, label: "x", bytes, mimeType: "image/png" }).catch((e) => e);
+      expect(err).toBeInstanceOf(DomainError);
+      expect(err.status).toBe(400);
+      expect(err.message).toBe("O arquivo não parece ser uma imagem PNG, JPEG ou WebP.");
+    }
+    expect(await db.select().from(assets)).toHaveLength(0);
+  });
+
   it("remove referência no briefing", async () => {
     const m = await makeDeps();
     cleanup = m.cleanup;
@@ -926,6 +977,39 @@ describe("referências", () => {
     const a = await addReference(m.deps, { projectId: p.id, label: "produto", bytes: png, mimeType: "image/png" });
     await removeReference(db, a.id);
     expect((await getSnapshot(db, p.id)).references).toHaveLength(0);
+  });
+});
+
+describe("removeReference com cenas já planejadas", () => {
+  const sentence = (l: string) => `A referência “${l}” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.`;
+  const noticeOf = async (id: string) => (await db.select().from(scenes).where(eq(scenes.id, id)))[0]!.notice;
+
+  it("avisa só as cenas que usavam a imagem, preserva avisos e não repete frase", async () => {
+    const p = await seedProject(db);
+    const a = await seedAsset(db, p.id, { label: "produto" });
+    const b = await seedAsset(db, p.id, { label: "pessoa" });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [a.id, b.id] });
+    const s2 = await seedScene(db, p.id, 1, { assetIds: [b.id] });
+    const s3 = await seedScene(db, p.id, 2, { assetIds: [] });
+    await db.update(scenes).set({ notice: "Cena cortada." }).where(eq(scenes.id, s1.id));
+
+    await removeReference(db, a.id);
+    expect(await noticeOf(s1.id)).toBe(`Cena cortada. ${sentence("produto")}`);
+    expect(await noticeOf(s2.id)).toBeNull();
+    expect(await noticeOf(s3.id)).toBeNull();
+
+    await removeReference(db, b.id);
+    expect(await noticeOf(s1.id)).toBe(`Cena cortada. ${sentence("produto")} ${sentence("pessoa")}`);
+    expect(await noticeOf(s2.id)).toBe(sentence("pessoa"));
+    expect(await noticeOf(s3.id)).toBeNull();
+  });
+
+  it("sem cenas nada muda", async () => {
+    const p = await seedProject(db);
+    const a = await seedAsset(db, p.id, { label: "produto" });
+    await removeReference(db, a.id);
+    expect(await db.select().from(scenes)).toHaveLength(0);
+    expect(await db.select().from(assets)).toHaveLength(0);
   });
 });
 
@@ -1077,6 +1161,26 @@ export type Snapshot = {
 const IMAGE_TYPES: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+// O tipo declarado pelo cliente não é confiável: o formato real vem da assinatura do arquivo.
+function detectImageMime(b: Buffer): string | null {
+  if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b.length >= 12 && b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP") return "image/webp";
+  return null;
+}
+
+// Avisa as cenas que usavam a imagem removida (o roteiro é preservado; a edição do usuário não se perde).
+export async function noteRemovedReference(tx: DbOrTx, assetId: string, label: string | null): Promise<void> {
+  const links = await tx.select({ sceneId: sceneReferences.sceneId }).from(sceneReferences).where(eq(sceneReferences.assetId, assetId));
+  if (links.length === 0) return;
+  const sentence = `A referência “${label ?? "sem rótulo"}” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.`;
+  const rows = await tx.select().from(scenes).where(inArray(scenes.id, links.map((l) => l.sceneId)));
+  for (const scene of rows) {
+    if (scene.notice?.includes(sentence)) continue;
+    await tx.update(scenes).set({ notice: scene.notice ? `${scene.notice} ${sentence}` : sentence }).where(eq(scenes.id, scene.id));
+  }
+}
+
 export async function createProject(db: Db, input: { name: string; mode: Mode; copy?: string }): Promise<Project> {
   const name = input.name.trim();
   if (!name) throw new DomainError("Dê um nome ao projeto");
@@ -1117,15 +1221,17 @@ export async function addReference(
   const ext = IMAGE_TYPES[input.mimeType];
   if (!ext) throw new DomainError("Formato de imagem não suportado (use PNG, JPEG ou WebP)");
   if (input.bytes.length > MAX_IMAGE_BYTES) throw new DomainError("Imagem maior que 10 MB");
+  const mimeType = detectImageMime(input.bytes);
+  if (!mimeType) throw new DomainError("O arquivo não parece ser uma imagem PNG, JPEG ou WebP.");
   const label = input.label.trim();
   if (!label) throw new DomainError("Dê um rótulo à imagem (ex.: produto, pessoa)");
   await assertLabelFree(db, project.id, label);
 
-  const key = `projects/${project.id}/references/${randomUUID()}.${ext}`;
-  await storage.put(key, input.bytes, input.mimeType);
+  const key = `projects/${project.id}/references/${randomUUID()}.${IMAGE_TYPES[mimeType]}`;
+  await storage.put(key, input.bytes, mimeType);
   const [row] = await db
     .insert(assets)
-    .values({ projectId: project.id, kind: "reference", label, storageKey: key, mimeType: input.mimeType })
+    .values({ projectId: project.id, kind: "reference", label, storageKey: key, mimeType })
     .returning();
   return row!;
 }
@@ -1135,7 +1241,10 @@ export async function removeReference(db: Db, assetId: string): Promise<void> {
   if (!asset || asset.kind !== "reference") throw new DomainError("Referência não encontrada", 404);
   const project = await getProject(db, asset.projectId);
   if (project.stage !== "briefing") throw new DomainError("Referências só podem ser alteradas no briefing");
-  await db.delete(assets).where(eq(assets.id, assetId));
+  await db.transaction(async (tx) => {
+    await noteRemovedReference(tx, assetId, asset.label);
+    await tx.delete(assets).where(eq(assets.id, assetId));
+  });
 }
 
 async function assertCanEnter(db: DbOrTx, project: Project, target: Stage): Promise<void> {
@@ -2054,6 +2163,7 @@ Expected: FAIL — módulo não encontrado.
 ```ts
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { PNG_BYTES } from "../helpers/images";
 import { eq, inArray } from "drizzle-orm";
 import type { DbOrTx } from "@/db/client";
 import { assets, projects, sceneAttempts, scenes, type AttemptStatus } from "@/db/schema";
@@ -2236,7 +2346,7 @@ git commit -m "feat(modules): resumable scene generation handler"
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { assets, characters, jobs, sceneReferences } from "@/db/schema";
+import { assets, characters, jobs, sceneReferences, scenes } from "@/db/schema";
 import { DomainError } from "@/services/errors";
 import { handleGenerateCharacter, onGenerateCharacterDead } from "@/modules/character-designer";
 import {
@@ -2324,6 +2434,38 @@ describe("CRUD", () => {
     await removeCharacter(db, c.id);
     expect(await db.select().from(characters)).toHaveLength(0);
     expect(await db.select().from(assets).where(eq(assets.id, img.id))).toHaveLength(0);
+  });
+
+  it("removeCharacter avisa as cenas que usavam o personagem e preserva avisos", async () => {
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const imgA = await seedAsset(db, p.id, { kind: "character", label: "Ana" });
+    const imgB = await seedAsset(db, p.id, { kind: "character", label: "Beto" });
+    const a = await seedCharacter(db, p.id, { name: "Ana", imageStatus: "ready", assetId: imgA.id });
+    const b = await seedCharacter(db, p.id, { name: "Beto", imageStatus: "ready", assetId: imgB.id });
+    const s1 = await seedScene(db, p.id, 0, { assetIds: [imgA.id, imgB.id] });
+    const s2 = await seedScene(db, p.id, 1, { assetIds: [imgB.id] });
+    const s3 = await seedScene(db, p.id, 2, {});
+    await db.update(scenes).set({ notice: "Cena cortada." }).where(eq(scenes.id, s1.id));
+    const notice = async (id: string) => (await db.select().from(scenes).where(eq(scenes.id, id)))[0]!.notice;
+    const msg = (n: string) => `A referência “${n}” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.`;
+
+    await removeCharacter(db, a.id);
+    expect(await notice(s1.id)).toBe(`Cena cortada. ${msg("Ana")}`);
+    expect(await notice(s2.id)).toBeNull();
+    expect(await notice(s3.id)).toBeNull();
+
+    await removeCharacter(db, b.id);
+    expect(await notice(s1.id)).toBe(`Cena cortada. ${msg("Ana")} ${msg("Beto")}`);
+    expect(await notice(s2.id)).toBe(msg("Beto"));
+    expect(await notice(s3.id)).toBeNull();
+  });
+
+  it("removeCharacter sem cenas não altera nada além do personagem", async () => {
+    const p = await seedProject(db, { mode: "novelinha", stage: "characters" });
+    const img = await seedAsset(db, p.id, { kind: "character", label: "A" });
+    const c = await seedCharacter(db, p.id, { name: "A", imageStatus: "ready", assetId: img.id });
+    await removeCharacter(db, c.id);
+    expect(await db.select().from(scenes)).toHaveLength(0);
   });
 
   it("regenerateCharacterImage volta para pending e enfileira", async () => {
@@ -2617,7 +2759,7 @@ import { proposeCharacters } from "@/modules/character-designer";
 import { enqueue } from "@/queue/queue";
 import { DomainError } from "./errors";
 import { assertLabelFree } from "./labels";
-import { getProject, type Character } from "./projects";
+import { getProject, noteRemovedReference, type Character } from "./projects";
 
 // Etapa válida para mexer em personagens (chamar depois de lockProjectRow dentro de transações).
 async function assertCharactersStage(tx: DbOrTx, projectId: string) {
@@ -2767,6 +2909,7 @@ export async function removeCharacter(db: Db, id: string): Promise<void> {
     await lockProjectRow(tx, found.projectId);
     await assertCharactersStage(tx, found.projectId);
     const current = await lockCharacter(tx, id);
+    if (current.assetId) await noteRemovedReference(tx, current.assetId, current.name);
     await tx.delete(characters).where(eq(characters.id, id));
     if (current.assetId) await tx.delete(assets).where(eq(assets.id, current.assetId));
   });
@@ -3536,7 +3679,7 @@ async function ugcUntilGenerated(m: Awaited<ReturnType<typeof makeDeps>>) {
   const handlers = buildHandlers(m.deps);
   const p = await createProject(db, { name: "Flow", mode: "ugc" });
   await updateBriefing(db, p.id, { copy: "Copy do produto milagroso" });
-  await addReference(m.deps, { projectId: p.id, label: "produto", bytes: Buffer.from("png"), mimeType: "image/png" });
+  await addReference(m.deps, { projectId: p.id, label: "produto", bytes: PNG_BYTES, mimeType: "image/png" });
   await setStage(db, p.id, "script");
   await planProjectScript(m.deps, p.id);
   await generateAllScenes(m.deps, p.id);

@@ -27,6 +27,26 @@ export type Snapshot = {
 const IMAGE_TYPES: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+// O tipo declarado pelo cliente não é confiável: o formato real vem da assinatura do arquivo.
+function detectImageMime(b: Buffer): string | null {
+  if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b.length >= 12 && b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP") return "image/webp";
+  return null;
+}
+
+// Avisa as cenas que usavam a imagem removida (o roteiro é preservado; a edição do usuário não se perde).
+export async function noteRemovedReference(tx: DbOrTx, assetId: string, label: string | null): Promise<void> {
+  const links = await tx.select({ sceneId: sceneReferences.sceneId }).from(sceneReferences).where(eq(sceneReferences.assetId, assetId));
+  if (links.length === 0) return;
+  const sentence = `A referência “${label ?? "sem rótulo"}” foi removida; replaneje o roteiro ou revise esta cena antes de gerar.`;
+  const rows = await tx.select().from(scenes).where(inArray(scenes.id, links.map((l) => l.sceneId)));
+  for (const scene of rows) {
+    if (scene.notice?.includes(sentence)) continue;
+    await tx.update(scenes).set({ notice: scene.notice ? `${scene.notice} ${sentence}` : sentence }).where(eq(scenes.id, scene.id));
+  }
+}
+
 export async function createProject(db: Db, input: { name: string; mode: Mode; copy?: string }): Promise<Project> {
   const name = input.name.trim();
   if (!name) throw new DomainError("Dê um nome ao projeto");
@@ -73,15 +93,17 @@ export async function addReference(
   const ext = IMAGE_TYPES[input.mimeType];
   if (!ext) throw new DomainError("Formato de imagem não suportado (use PNG, JPEG ou WebP)");
   if (input.bytes.length > MAX_IMAGE_BYTES) throw new DomainError("Imagem maior que 10 MB");
+  const mimeType = detectImageMime(input.bytes);
+  if (!mimeType) throw new DomainError("O arquivo não parece ser uma imagem PNG, JPEG ou WebP.");
   const label = input.label.trim();
   if (!label) throw new DomainError("Dê um rótulo à imagem (ex.: produto, pessoa)");
   await assertLabelFree(db, project.id, label);
 
-  const key = `projects/${project.id}/references/${randomUUID()}.${ext}`;
-  await storage.put(key, input.bytes, input.mimeType);
+  const key = `projects/${project.id}/references/${randomUUID()}.${IMAGE_TYPES[mimeType]}`;
+  await storage.put(key, input.bytes, mimeType);
   const [row] = await db
     .insert(assets)
-    .values({ projectId: project.id, kind: "reference", label, storageKey: key, mimeType: input.mimeType })
+    .values({ projectId: project.id, kind: "reference", label, storageKey: key, mimeType })
     .returning();
   return row!;
 }
@@ -91,7 +113,10 @@ export async function removeReference(db: Db, assetId: string): Promise<void> {
   if (!asset || asset.kind !== "reference") throw new DomainError("Referência não encontrada", 404);
   const project = await getProject(db, asset.projectId);
   if (project.stage !== "briefing") throw new DomainError("Referências só podem ser alteradas no briefing");
-  await db.delete(assets).where(eq(assets.id, assetId));
+  await db.transaction(async (tx) => {
+    await noteRemovedReference(tx, assetId, asset.label);
+    await tx.delete(assets).where(eq(assets.id, assetId));
+  });
 }
 
 async function assertCanEnter(db: DbOrTx, project: Project, target: Stage): Promise<void> {

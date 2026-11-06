@@ -19,6 +19,9 @@ pnpm dev                          # terminal 2: http://localhost:3000
 
 Se a porta 5433 já estiver em uso, escolha outra: `POSTGRES_PORT=5434 docker compose up -d` e ajuste a porta em `DATABASE_URL` no `.env` (e em `TEST_DATABASE_URL`, se usar). A senha de acesso é o valor de `ACCESS_PASSWORD` no `.env`.
 
+- `next start` (produção) grava o cookie de sessão com `Secure`: funciona em HTTPS e em `localhost`, mas não em `http://` por IP da rede. Para testar na rede local, use `pnpm dev`.
+- No modo fake, o texto de teste nunca cita personagens por rótulo; por isso as cenas não mostram referências por cena nem o aviso de corte.
+
 ## Testes
 
 ```bash
@@ -96,4 +99,6 @@ Checklist do primeiro deploy:
 - Sair (logout) apenas apaga o cookie: o token é sem estado e continua válido por até 14 dias. Para revogar todas as sessões, troque o `SESSION_SECRET`. Trocar apenas o `ACCESS_PASSWORD` **não** invalida as sessões existentes.
 - Os arquivos (imagens, vídeos) só são servidos pela rota autenticada; não há URL pública do Bucket.
 - Jobs travados (worker que caiu no meio) são reaproveitados após 30 minutos. `MAX_GENERATION_WAIT_MS` (30 min) e `FFMPEG_TIMEOUT_MS` (10 min) são constantes no código, não variáveis de ambiente; os valores ainda aguardam confirmação do dono do produto.
+- Arquivos de imagem substituídos ou removidos (troca da imagem de um personagem, remoção de personagem ou referência, nova proposta de personagens) continuam no Bucket: a interface `Storage` não tem remoção e o spec não define retenção. Limpeza manual por enquanto.
+- Remover uma referência ou um personagem depois que o roteiro existe não apaga o roteiro: as cenas que usavam a imagem recebem um aviso na própria cena.
 - Custo: gerações reais, testes `LIVE=1` e o teste de fumaça com provider real consomem crédito Gemini. Peça o aval do dono antes.

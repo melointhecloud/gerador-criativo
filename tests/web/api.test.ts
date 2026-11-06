@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PNG_BYTES } from "../helpers/images";
 import { readdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -258,7 +259,7 @@ describe("upload de referência", () => {
       params: Promise.resolve({ id: projectId }),
     });
   }
-  const png = () => new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" });
+  const png = () => new File([new Uint8Array(PNG_BYTES)], "a.png", { type: "image/png" });
 
   it("aceita imagem com rótulo; rejeita sem arquivo, sem rótulo, tipo errado e acima de 10 MB", async () => {
     const p = await seedProject(testDb);
@@ -278,6 +279,13 @@ describe("upload de referência", () => {
     nolabel.set("file", png());
     nolabel.set("label", "  ");
     expect((await upload(p.id, nolabel)).status).toBe(400);
+
+    const fake = new FormData();
+    fake.set("file", new File(["só texto, 14b"], "a.png", { type: "image/png" }));
+    fake.set("label", "falso");
+    const fakeRes = await upload(p.id, fake);
+    expect(fakeRes.status).toBe(400);
+    expect((await fakeRes.json()).error).toBe("O arquivo não parece ser uma imagem PNG, JPEG ou WebP.");
 
     const wrong = new FormData();
     wrong.set("file", new File(["<html>"], "a.html", { type: "text/html" }));

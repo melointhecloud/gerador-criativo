@@ -6,7 +6,7 @@ import { proposeCharacters } from "@/modules/character-designer";
 import { enqueue } from "@/queue/queue";
 import { DomainError } from "./errors";
 import { assertLabelFree } from "./labels";
-import { getProject, type Character } from "./projects";
+import { getProject, noteRemovedReference, type Character } from "./projects";
 
 // Etapa válida para mexer em personagens (chamar depois de lockProjectRow dentro de transações).
 async function assertCharactersStage(tx: DbOrTx, projectId: string) {
@@ -156,6 +156,7 @@ export async function removeCharacter(db: Db, id: string): Promise<void> {
     await lockProjectRow(tx, found.projectId);
     await assertCharactersStage(tx, found.projectId);
     const current = await lockCharacter(tx, id);
+    if (current.assetId) await noteRemovedReference(tx, current.assetId, current.name);
     await tx.delete(characters).where(eq(characters.id, id));
     if (current.assetId) await tx.delete(assets).where(eq(assets.id, current.assetId));
   });
