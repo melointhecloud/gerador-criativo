@@ -1574,7 +1574,7 @@ a { color: inherit; }
 .notice { color: var(--warn); font-size: 13px; }
 input, textarea, select { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 textarea { min-height: 80px; resize: vertical; }
-button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button, a.button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; display: inline-block; }
 button.secondary { background: #fff; color: var(--accent); }
 button:disabled { opacity: .45; cursor: not-allowed; }
 .steps { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -1594,6 +1594,7 @@ video.clip { width: 100%; max-width: 260px; aspect-ratio: 9 / 16; background: #0
 ```ts
 import type { Snapshot } from "@/services/projects";
 
+// Resposta de GET /api/projects/:id. As datas chegam como string (JSON), mas a UI não as usa.
 export type ProjectView = Snapshot & { estimatedSeconds: number };
 export type PanelProps = {
   snap: ProjectView;
@@ -1619,18 +1620,27 @@ export const STAGE_LABELS: Record<Stage, string> = {
 
 `src/lib/api.ts`:
 ```ts
+// URLs sempre relativas (mesma origem): a API recusa requisições de outra origem e usa o cookie de sessão.
 export async function api<T = unknown>(
   path: string,
   init: { method?: string; body?: unknown; form?: FormData } = {},
 ): Promise<T> {
   const hasBody = init.body !== undefined || init.form !== undefined;
-  const res = await fetch(path, {
-    method: init.method ?? (hasBody ? "POST" : "GET"),
-    headers: init.body !== undefined ? { "content-type": "application/json" } : undefined,
-    body: init.form ?? (init.body !== undefined ? JSON.stringify(init.body) : undefined),
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: init.method ?? (hasBody ? "POST" : "GET"),
+      headers: init.body !== undefined ? { "content-type": "application/json" } : undefined,
+      body: init.form ?? (init.body !== undefined ? JSON.stringify(init.body) : undefined),
+    });
+  } catch {
+    throw new Error("Sem conexão com o servidor. Verifique a internet e tente de novo.");
+  }
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && typeof window !== "undefined") window.location.href = "/login";
+  // Sessão expirada: volta ao login (exceto na própria tela de login, onde 401 = senha incorreta).
+  if (res.status === 401 && typeof window !== "undefined" && window.location.pathname !== "/login") {
+    window.location.href = "/login";
+  }
   if (!res.ok) throw new Error((data as { error?: string }).error ?? `Erro ${res.status}`);
   return data as T;
 }
@@ -1639,9 +1649,11 @@ export async function api<T = unknown>(
 `src/lib/useProject.ts`:
 ```ts
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { ProjectView } from "./types";
+
+const POLL_MS = 3000;
 
 function isBusy(s: ProjectView): boolean {
   return (
@@ -1655,25 +1667,44 @@ function isBusy(s: ProjectView): boolean {
 export function useProject(id: string) {
   const [snap, setSnap] = useState<ProjectView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const alive = useRef(true);
 
   const reload = useCallback(async () => {
     try {
-      setSnap(await api<ProjectView>(`/api/projects/${id}`));
+      const next = await api<ProjectView>(`/api/projects/${id}`);
+      if (!alive.current) return;
+      setSnap(next);
       setLoadError(null);
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e));
+      if (alive.current) setLoadError(e instanceof Error ? e.message : String(e));
     }
   }, [id]);
 
   useEffect(() => {
+    alive.current = true;
     void reload();
+    return () => {
+      alive.current = false;
+    };
   }, [reload]);
 
+  // Consulta periódica só enquanto há trabalho em andamento. Um timer por vez: a próxima consulta
+  // só é agendada depois que a anterior termina (sem acúmulo de requisições se o servidor demorar).
   const busy = snap ? isBusy(snap) : false;
   useEffect(() => {
-    const t = setInterval(() => void reload(), busy ? 3000 : 15000);
-    return () => clearInterval(t);
-  }, [reload, busy]);
+    if (!busy) return;
+    let timer: ReturnType<typeof setTimeout>;
+    let stopped = false;
+    const tick = async () => {
+      await reload();
+      if (!stopped) timer = setTimeout(() => void tick(), POLL_MS);
+    };
+    timer = setTimeout(() => void tick(), POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [busy, reload]);
 
   return { snap, loadError, reload };
 }
@@ -1713,7 +1744,7 @@ export default function LoginPage() {
           Senha do time
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
         </label>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="alert">{error}</div>}
         <button disabled={loading || !password}>Entrar</button>
       </form>
     </main>
@@ -1751,12 +1782,12 @@ export function NewProjectForm() {
   return (
     <form className="card stack" onSubmit={submit}>
       <h2 style={{ margin: 0 }}>Novo criativo</h2>
-      <input placeholder="Nome do projeto" value={name} onChange={(e) => setName(e.target.value)} />
-      <select value={mode} onChange={(e) => setMode(e.target.value as "ugc" | "novelinha")}>
+      <input aria-label="Nome do projeto" placeholder="Nome do projeto" value={name} onChange={(e) => setName(e.target.value)} />
+      <select aria-label="Tipo de criativo" value={mode} onChange={(e) => setMode(e.target.value as "ugc" | "novelinha")}>
         <option value="ugc">UGC (pessoa falando para a câmera)</option>
         <option value="novelinha">Novelinha (história com personagens)</option>
       </select>
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error" role="alert">{error}</div>}
       <button disabled={loading || !name.trim()}>Criar</button>
     </form>
   );
@@ -1845,6 +1876,7 @@ export function ProjectView({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
+  // Toda ação do usuário passa por aqui: um pedido por vez (evita clique duplo em ações pagas) e o erro vai para a tela.
   async function run(fn: () => Promise<unknown>) {
     setWorking(true);
     setError(null);
@@ -1853,6 +1885,7 @@ export function ProjectView({ id }: { id: string }) {
       await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      await reload();
     } finally {
       setWorking(false);
     }
@@ -1863,6 +1896,7 @@ export function ProjectView({ id }: { id: string }) {
   const { project } = snap;
   const stages = stagesFor(project.mode);
   const currentIndex = stages.indexOf(project.stage);
+  // A API só aceita voltar para etapas navegáveis, e só o worker tira o projeto de `generating`.
   const canGoBack = project.stage !== "generating" && project.stage !== "assembling";
   const goTo = (stage: Stage) => run(() => api(`/api/projects/${id}/stage`, { body: { stage } }));
 
@@ -1885,6 +1919,7 @@ export function ProjectView({ id }: { id: string }) {
               className={`step ${i === currentIndex ? "current" : past ? "past" : ""}`}
               style={{ cursor: clickable ? "pointer" : "default" }}
               disabled={!clickable || working}
+              aria-current={i === currentIndex ? "step" : undefined}
               onClick={() => void goTo(s)}
             >
               {STAGE_LABELS[s]}
@@ -1893,7 +1928,7 @@ export function ProjectView({ id }: { id: string }) {
         })}
       </div>
 
-      {(error || loadError) && <div className="error">{error ?? loadError}</div>}
+      {(error || loadError) && <div className="error" role="alert">{error ?? loadError}</div>}
 
       {project.stage === "briefing" && <BriefingPanel snap={snap} run={run} working={working} />}
       {project.stage === "characters" && <CharactersPanel snap={snap} run={run} working={working} />}
@@ -1967,7 +2002,7 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
           <div className="grid">
             {references.map((r) => (
               <div key={r.id} className="stack">
-                <img className="thumb" src={`/api/assets/${r.id}`} alt={r.label ?? ""} />
+                <img className="thumb" src={`/api/assets/${r.id}`} alt={r.label ?? "Imagem de referência"} />
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span>{r.label}</span>
                   <button
@@ -1982,8 +2017,20 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
             ))}
           </div>
           <div className="row">
-            <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ flex: 2 }} />
-            <input placeholder="Rótulo (ex.: produto)" value={label} onChange={(e) => setLabel(e.target.value)} style={{ flex: 1 }} />
+            <input
+              ref={fileRef}
+              aria-label="Arquivo de imagem"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              style={{ flex: 2 }}
+            />
+            <input
+              aria-label="Rótulo da imagem"
+              placeholder="Rótulo (ex.: produto)"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              style={{ flex: 1 }}
+            />
             <button className="secondary" disabled={working} onClick={() => void run(upload)}>
               Enviar
             </button>
@@ -2032,8 +2079,8 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
           <span className="muted">{c.imageStatus === "failed" ? `Falhou: ${c.imageError ?? ""}` : "Gerando imagem…"}</span>
         </div>
       )}
-      <input value={name} onChange={(e) => setName(e.target.value)} />
-      <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
+      <input aria-label="Nome do personagem" value={name} onChange={(e) => setName(e.target.value)} />
+      <textarea aria-label="Aparência do personagem" value={description} onChange={(e) => setDescription(e.target.value)} />
       <div className="row">
         {dirty && (
           <button
@@ -2093,7 +2140,7 @@ export function CharactersPanel({ snap, run, working }: PanelProps) {
             void run(() => api(`/api/projects/${project.id}/characters/propose`, { method: "POST", body: {} }));
           }}
         >
-          {characters.length ? "Sugerir de novo" : "Sugerir personagens"}
+          {working ? "Trabalhando…" : characters.length ? "Sugerir de novo" : "Sugerir personagens"}
         </button>
       </div>
 
@@ -2105,8 +2152,9 @@ export function CharactersPanel({ snap, run, working }: PanelProps) {
 
       <div className="card stack">
         <strong>Adicionar personagem</strong>
-        <input placeholder="Nome" value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <input aria-label="Nome" placeholder="Nome" value={newName} onChange={(e) => setNewName(e.target.value)} />
         <textarea
+          aria-label="Aparência"
           placeholder="Aparência: idade, rosto, cabelo, roupa…"
           value={newDescription}
           onChange={(e) => setNewDescription(e.target.value)}
@@ -2173,7 +2221,7 @@ function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "w
       </label>
       <label style={{ maxWidth: 140 }}>
         Duração (s)
-        <input type="number" min={3} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
+        <input type="number" min={3} step={1} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
       </label>
       {scene.notice && <div className="notice">{scene.notice}</div>}
       {dirty && (
@@ -2206,6 +2254,7 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
         <strong>{hasScenes ? "Pedir ajustes ao roteiro" : "Gerar roteiro a partir da copy"}</strong>
         {hasScenes && (
           <textarea
+            aria-label="Ajustes ao roteiro"
             placeholder="Ex.: tire a cena 3, deixe a abertura mais curta, mais emoção no final…"
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
@@ -2238,7 +2287,7 @@ export function ScriptPanel({ snap, run, working }: PanelProps) {
           <button
             disabled={working}
             onClick={() => {
-              if (!confirm(`Serão geradas ${scenes.length} cenas (${estimatedSeconds} s de vídeo). Continuar?`)) return;
+              if (!confirm(`Serão geradas ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Continuar?`)) return;
               void run(() => api(`/api/projects/${project.id}/generate`, { method: "POST", body: {} }));
             }}
           >
@@ -2276,12 +2325,13 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
   const latestDone = [...attempts].reverse().find((a) => a.status === "done");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [prompt, setPrompt] = useState(latest?.prompt ?? "");
+  const [prompt, setPrompt] = useState(latest?.prompt ?? scene.visualPrompt);
 
   const shown = attempts.find((a) => a.id === (selectedId ?? scene.approvedAttemptId)) ?? latestDone;
   const pending = latest?.status === "queued" || latest?.status === "generating";
   const approved = shown && shown.id === scene.approvedAttemptId;
   const status = latest ? STATUS[latest.status] : undefined;
+  const failed = latest?.status === "failed" || latest?.status === "blocked";
 
   return (
     <div className="card scene">
@@ -2303,7 +2353,9 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
           </span>
         </div>
         <div className="muted">{scene.dialogue ? `“${scene.dialogue}”` : "(sem fala)"}</div>
+        {scene.notice && <div className="notice">{scene.notice}</div>}
         {latest?.error && <div className="error">{latest.error}</div>}
+        {failed && reviewing && <div className="muted">Use “Regerar” para tentar de novo.</div>}
 
         {attempts.length > 1 && (
           <div className="row">
@@ -2314,6 +2366,7 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
                 className={shown?.id === a.id ? "" : "secondary"}
                 style={{ padding: "2px 10px" }}
                 disabled={a.status !== "done"}
+                aria-label={`Ver versão ${i + 1}`}
                 onClick={() => setSelectedId(a.id)}
               >
                 v{i + 1}
@@ -2333,22 +2386,34 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
               >
                 Aprovar esta versão
               </button>
-              <button className="secondary" disabled={working || pending} onClick={() => setEditing((v) => !v)}>
+              <button
+                className="secondary"
+                disabled={working || pending}
+                onClick={() => {
+                  if (!editing) setPrompt(latest?.prompt ?? scene.visualPrompt);
+                  setEditing((v) => !v);
+                }}
+              >
                 Ajustar prompt
               </button>
               <button
                 className="secondary"
                 disabled={working || pending}
-                onClick={() =>
-                  void run(() =>
-                    api(`/api/scenes/${scene.id}/regenerate`, { body: editing ? { prompt } : {} }),
-                  ).then(() => setEditing(false))
-                }
+                onClick={() => {
+                  if (!confirm("Gerar esta cena de novo? Isso consome crédito do provedor.")) return;
+                  void run(async () => {
+                    await api(`/api/scenes/${scene.id}/regenerate`, { body: editing ? { prompt } : {} });
+                    setSelectedId(null);
+                    setEditing(false);
+                  });
+                }}
               >
                 Regerar{editing ? " com este prompt" : ""}
               </button>
             </div>
-            {editing && <textarea style={{ minHeight: 140 }} value={prompt} onChange={(e) => setPrompt(e.target.value)} />}
+            {editing && (
+              <textarea aria-label="Prompt da cena" style={{ minHeight: 140 }} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+            )}
           </>
         )}
       </div>
@@ -2391,7 +2456,7 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
           </span>
         )}
       </div>
-      {reviewing && snap.assembleError && <div className="error">A montagem falhou: {snap.assembleError}</div>}
+      {reviewing && snap.assembleError && <div className="error" role="alert">A montagem falhou: {snap.assembleError}</div>}
       {scenes.map((s, i) => (
         <SceneCard key={s.id} scene={s} index={i} run={run} working={working} reviewing={reviewing} />
       ))}
@@ -2420,8 +2485,8 @@ export function DonePanel({ snap, run, working }: PanelProps) {
             {finalAsset.durationSeconds ? `${finalAsset.durationSeconds.toFixed(1)} s · ` : ""}720×1280 · MP4
           </div>
           <div className="row">
-            <a href={`/api/assets/${finalAsset.id}?download=1`}>
-              <button>Baixar MP4</button>
+            <a className="button" href={`/api/assets/${finalAsset.id}?download=1`} download>
+              Baixar MP4
             </a>
             <button
               className="secondary"
@@ -2443,6 +2508,8 @@ export function DonePanel({ snap, run, working }: PanelProps) {
 - [ ] **Step 9: Verificar build e tipos**
 
 Run: `pnpm typecheck && pnpm build`
+> **Divergências do código original (Task 4 executada):** (1) `api()` não redireciona para `/login` quando já está em `/login` (401 ali = senha incorreta, e o redirect apagava a mensagem) e traduz falha de rede; (2) `useProject` consulta só enquanto há trabalho em andamento (geração/montagem/personagem pendente), com um timer encadeado (a próxima consulta só é agendada quando a anterior termina) e descarta respostas após desmontar; (3) `run()` recarrega o estado também após erro; (4) `ScenesPanel` mostra o `notice` por cena, pede confirmação antes de regerar uma cena (custa crédito), sincroniza o prompt editável com a última tentativa e volta à versão mais recente após regerar; (5) `DonePanel` usa `<a class="button">` em vez de `<button>` dentro de `<a>`; (6) rótulos `aria-label` e `role="alert"` nos erros; (7) `pnpm build` reescreve o `tsconfig.json` (`jsx: react-jsx`, `allowJs`, `.next/dev/types` no `include`): o arquivo com essas mudanças é commitado (Plano 1, Task 1 atualizado). TypeScript 7 funcionou com o Next 16.4 sem fixar versão.
+
 Expected: typecheck limpo; `next build` termina com a lista de rotas, incluindo `/`, `/login`, `/projects/[id]` e as rotas `/api/**` (todas dinâmicas `ƒ`). Se o build tentar conectar ao banco ou exigir variáveis de ambiente, é sinal de que algo chama `getContext()` no topo de um módulo: mover a chamada para dentro do handler.
 
 - [ ] **Step 10: Rodar a suíte completa**
