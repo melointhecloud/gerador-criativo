@@ -44,3 +44,48 @@ export function BrandMark({ className = "brand-mark" }: IconProps) {
     </svg>
   );
 }
+
+// Estados da cena (geração e revisão). Sempre ao lado do texto do estado.
+export function ClockIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </svg>
+  );
+}
+
+// Gerando: um quadro 9:16 sendo preenchido (estático; o movimento fica só na barra de progresso).
+export function FrameIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="6.5" y="3" width="11" height="18" rx="1.5" />
+      <path d="M6.5 14h11" />
+    </svg>
+  );
+}
+
+export function BlockIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="m6 6 12 12" />
+    </svg>
+  );
+}
+
+export function DownloadIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" />
+    </svg>
+  );
+}
+
+export function ArrowLeftIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M19 12H5M11 6l-6 6 6 6" />
+    </svg>
+  );
+}
