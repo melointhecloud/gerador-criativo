@@ -4,8 +4,12 @@ import {
   assembleState,
   countScenes,
   finalVideoFacts,
+  failureText,
   formatAttemptTime,
+  nextUpIndex,
+  pendingSince,
   readyText,
+  sceneBadges,
   sceneCardModel,
   type AttemptLike,
   type AttemptStatus,
@@ -51,6 +55,7 @@ describe("assembleState", () => {
   it("monta só com todas aprovadas e sem pedido em andamento", () => {
     expect(assembleState(counts(3, 3), false)).toEqual({ canAssemble: true, reason: null });
     expect(assembleState(counts(3, 3), true)).toEqual({ canAssemble: false, reason: null });
+    expect(assembleState(counts(0, 0), false).canAssemble).toBe(false); // sem cenas, o servidor recusa
   });
   it("diz quantas cenas faltam", () => {
     expect(assembleState(counts(2, 3), false)).toEqual({
@@ -92,9 +97,9 @@ describe("sceneCardModel", () => {
     const v1 = attempt("done");
     const v2 = attempt("blocked", { error: "Conteúdo bloqueado" });
     const m = sceneCardModel(scene([v1, v2]), null, false);
-    expect(m.status).toEqual({ label: "Bloqueada", tone: "bad", key: "blocked" });
+    expect(m.badges).toEqual([{ key: "blocked", label: "Bloqueada", tone: "bad" }]);
     expect(m.failed).toBe(true);
-    expect(m.error).toBe("Conteúdo bloqueado");
+    expect(m.failure).toBe("A versão 2 foi bloqueada: Conteúdo bloqueado");
     expect(m.shown).toBe(v1); // a versão antiga pronta continua no palco
   });
   it("aprovar: só versão pronta, ainda não aprovada, sem pedido em andamento", () => {
@@ -118,6 +123,47 @@ describe("sceneCardModel", () => {
     const v1 = attempt("done", { prompt: "prompt ajustado" });
     expect(sceneCardModel(scene([v1]), null, false).promptSeed).toBe("prompt ajustado");
     expect(sceneCardModel(scene([]), null, false).promptSeed).toBe("descrição visual");
+  });
+});
+
+describe("selos, falha, tempo e próxima cena", () => {
+  it("aprovada mostra só 'Aprovada' quando a versão mais recente está pronta", () => {
+    const v1 = attempt("done");
+    expect(sceneBadges({ approvedAttemptId: v1.id }, v1, true).map((b) => b.label)).toEqual(["Aprovada"]);
+    // aprovou a v1 enquanto a v2 gera: os dois selos
+    expect(sceneBadges({ approvedAttemptId: v1.id }, attempt("generating"), true).map((b) => b.label)).toEqual([
+      "Aprovada",
+      "Gerando…",
+    ]);
+  });
+  it("'Pronta' sem aprovação é a sua vez na revisão e verde na geração", () => {
+    const v1 = attempt("done");
+    expect(sceneBadges({ approvedAttemptId: null }, v1, true)).toEqual([{ key: "done", label: "Pronta", tone: "you" }]);
+    expect(sceneBadges({ approvedAttemptId: null }, v1, false)).toEqual([{ key: "done", label: "Pronta", tone: "done" }]);
+  });
+  it("na revisão, o cabeçalho não repete 'Aprovada' quando a versão no palco é a aprovada", () => {
+    const v1 = attempt("done");
+    const v2 = attempt("done");
+    expect(sceneCardModel(scene([v1, v2], v1.id), null, false).badges).toEqual([]);
+    expect(sceneCardModel(scene([v1, v2], v1.id), v2.id, false).badges.map((b) => b.label)).toEqual(["Aprovada"]);
+    expect(sceneCardModel(scene([v1], v1.id), null, false, false).badges.map((b) => b.label)).toEqual(["Aprovada"]);
+  });
+  it("frase da falha com a mensagem do provedor (ou um texto quando não há)", () => {
+    expect(failureText(attempt("failed", { error: "Tempo esgotado" }), 1)).toBe("A geração falhou: Tempo esgotado");
+    expect(failureText(attempt("blocked"), 1)).toBe("A geração foi bloqueada: o provedor não informou o motivo.");
+    expect(failureText(attempt("done"), 1)).toBeNull();
+  });
+  it("tempo só do que a API grava: fila desde createdAt, gerando desde updatedAt", () => {
+    expect(pendingSince(attempt("queued"))).toBe("Na fila desde 14:32");
+    expect(pendingSince(attempt("generating", { updatedAt: "2026-11-05T17:35:00.000Z" }))).toBe("Gerando desde 14:35");
+    expect(pendingSince(attempt("done"))).toBeNull();
+    expect(pendingSince(undefined)).toBeNull();
+  });
+  it("próxima cena: a primeira sem aprovação e sem geração em andamento", () => {
+    const a = attempt("done");
+    expect(nextUpIndex([scene([a], a.id), scene([attempt("generating")]), scene([attempt("done")])])).toBe(2);
+    expect(nextUpIndex([scene([attempt("done"), attempt("failed")]), scene([attempt("done")])])).toBe(0); // falhou: regerar é com você
+    expect(nextUpIndex([scene([a], a.id)])).toBe(-1);
   });
 });
 

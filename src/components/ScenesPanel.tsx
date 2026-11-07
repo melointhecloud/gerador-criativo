@@ -1,103 +1,211 @@
 "use client";
-import { useState } from "react";
+import { useId, useState, type ComponentType, type KeyboardEvent } from "react";
 import { api } from "@/lib/api";
 import { confirmTexts } from "@/lib/confirmTexts";
+import {
+  approvedText,
+  assembleState,
+  countScenes,
+  nextUpIndex,
+  readyText,
+  sceneCardModel,
+  type BadgeKey,
+  type SceneBadge,
+  type SceneCardModel,
+} from "@/lib/scenes";
 import type { PanelProps, ProjectView } from "@/lib/types";
 import { useConfirm } from "./ConfirmDialog";
+import { AlertIcon, BlockIcon, CheckIcon, ClockIcon, EyeIcon, FrameIcon } from "./icons";
 
 type Scene = ProjectView["scenes"][number];
+type Attempt = Scene["attempts"][number];
 
-const STATUS: Record<string, { text: string; cls: string }> = {
-  queued: { text: "Na fila", cls: "work" },
-  generating: { text: "Gerando…", cls: "work" },
-  done: { text: "Pronta", cls: "done" },
-  failed: { text: "Falhou", cls: "bad" },
-  blocked: { text: "Bloqueada", cls: "bad" },
+const BADGE_ICON: Record<BadgeKey, ComponentType<{ className?: string }>> = {
+  approved: CheckIcon,
+  queued: ClockIcon,
+  generating: FrameIcon,
+  done: CheckIcon,
+  failed: AlertIcon,
+  blocked: BlockIcon,
 };
 
-function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "run" | "working"> & { scene: Scene; index: number; reviewing: boolean }) {
-  const attempts = scene.attempts;
-  const latest = attempts[attempts.length - 1];
-  const latestDone = [...attempts].reverse().find((a) => a.status === "done");
+function Badge({ b }: { b: SceneBadge }) {
+  // "Pronta" na revisão é a sua vez de assistir: olho, não o visto de "Aprovada".
+  const Icon = b.key === "done" && b.tone === "you" ? EyeIcon : BADGE_ICON[b.key];
+  return (
+    <span className={`badge badge-${b.tone}`}>
+      <Icon />
+      {b.label}
+    </span>
+  );
+}
+
+// Palco 9:16 da cena: o clipe da versão escolhida ou o estado escrito (nunca só cor).
+function TakeStage({ m, framed }: { m: SceneCardModel<Attempt>; framed: boolean }) {
+  const cls = `take-stage${framed ? " framed" : ""}`;
+  if (m.shown?.clipAssetId) {
+    return (
+      <div className={cls}>
+        <video src={`/api/assets/${m.shown.clipAssetId}`} controls playsInline preload="metadata" />
+      </div>
+    );
+  }
+  return (
+    <div className={cls}>
+      {m.pending ? (
+        <div className="media-state is-work">
+          {m.latest?.status === "queued" ? <ClockIcon /> : <FrameIcon />}
+          <span>{m.latest?.status === "queued" ? "Aguardando o provedor de vídeo" : "O provedor está gerando este clipe"}</span>
+        </div>
+      ) : m.failed ? (
+        <div className="media-state is-bad">
+          {m.latest?.status === "blocked" ? <BlockIcon /> : <AlertIcon />}
+          <span>Sem clipe</span>
+        </div>
+      ) : (
+        <div className="media-state">
+          <span>Sem vídeo</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Controle segmentado das versões: botões com aria-pressed; setas movem o foco entre as versões com vídeo.
+function VersionPicker({ m, sceneNumber, onPick }: { m: SceneCardModel<Attempt>; sceneNumber: number; onPick: (id: string) => void }) {
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    const buttons = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+    const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (at < 0 || buttons.length === 0) return;
+    e.preventDefault();
+    const next =
+      e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 : (at + (e.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]!.focus();
+  }
+  return (
+    <div className="versions">
+      <span className="versions-label" id={`versoes-${sceneNumber}`}>
+        Versões
+      </span>
+      <div className="segmented" role="group" aria-labelledby={`versoes-${sceneNumber}`} onKeyDown={onKeyDown}>
+        {m.versions.map((v) => (
+          <button
+            key={v.id}
+            type="button"
+            className="segment"
+            aria-pressed={v.selected}
+            aria-label={`Ver versão ${v.number}`}
+            aria-describedby={`versao-${v.id}`}
+            disabled={!v.selectable}
+            onClick={() => onPick(v.id)}
+          >
+            <span className="segment-label">
+              {v.label}
+              {v.approved && <CheckIcon className="icon segment-check" />}
+            </span>
+            <span className="segment-time" id={`versao-${v.id}`}>
+              {v.selectable ? v.time : v.status === "failed" ? "Falhou" : v.status === "blocked" ? "Bloqueada" : "Gerando…"}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SceneCard({
+  scene,
+  index,
+  run,
+  working,
+  reviewing,
+  framed,
+}: Pick<PanelProps, "run" | "working"> & { scene: Scene; index: number; reviewing: boolean; framed: boolean }) {
+  const uid = useId();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [prompt, setPrompt] = useState(latest?.prompt ?? scene.visualPrompt);
+  const [prompt, setPrompt] = useState(scene.attempts[scene.attempts.length - 1]?.prompt ?? scene.visualPrompt);
   const confirm = useConfirm();
-
-  const shown = attempts.find((a) => a.id === (selectedId ?? scene.approvedAttemptId)) ?? latestDone;
-  const pending = latest?.status === "queued" || latest?.status === "generating";
-  const approved = shown && shown.id === scene.approvedAttemptId;
-  const status = latest ? STATUS[latest.status] : undefined;
-  const failed = latest?.status === "failed" || latest?.status === "blocked";
+  const m = sceneCardModel(scene, selectedId, working, reviewing);
+  const n = index + 1;
+  const promptId = `${uid}-prompt`;
+  const regeneratePrimary = m.failed && !m.shown; // sem versão para aprovar: "Regerar" é a ação principal
 
   return (
-    <div className="card scene">
-      <div>
-        {shown?.clipAssetId ? (
-          <video className="clip" src={`/api/assets/${shown.clipAssetId}`} controls playsInline preload="metadata" />
-        ) : (
-          <div className="clip row" style={{ justifyContent: "center", background: "#222", color: "#bbb" }}>
-            {pending ? "Gerando…" : "Sem vídeo"}
-          </div>
-        )}
-      </div>
-      <div className="stack">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <strong>Cena {index + 1}</strong>
-          <span className="row">
-            {approved && <span className="badge done">Aprovada ✓</span>}
-            {status && <span className={`badge ${status.cls}`}>{status.text}</span>}
+    <li className={`panel take${m.approved ? " is-approved" : ""}`} aria-labelledby={`${uid}-titulo`}>
+      <TakeStage m={m} framed={framed} />
+      <div className="take-body">
+        <div className="take-head">
+          <h3 id={`${uid}-titulo`}>Cena {n}</h3>
+          <span className="take-badges">
+            {m.badges.map((b) => (
+              <Badge key={b.key} b={b} />
+            ))}
           </span>
         </div>
-        <div className="muted">{scene.dialogue ? `“${scene.dialogue}”` : "(sem fala)"}</div>
-        {scene.notice && <div className="notice">{scene.notice}</div>}
-        {latest?.error && <div className="error">{latest.error}</div>}
-        {failed && reviewing && <div className="muted">Use “Regerar” para tentar de novo.</div>}
-
-        {attempts.length > 1 && (
-          <div className="row">
-            <span className="muted">Versões:</span>
-            {attempts.map((a, i) => (
-              <button
-                key={a.id}
-                className={shown?.id === a.id ? "" : "secondary"}
-                style={{ padding: "2px 10px" }}
-                disabled={a.status !== "done"}
-                aria-label={`Ver versão ${i + 1}`}
-                onClick={() => setSelectedId(a.id)}
-              >
-                v{i + 1}
-              </button>
-            ))}
+        <p className={scene.dialogue ? "take-dialogue" : "take-dialogue muted"}>
+          {scene.dialogue ? `“${scene.dialogue}”` : "Sem fala"}
+        </p>
+        <p className="take-meta tabular">
+          <span>{scene.targetSeconds} s</span>
+          {m.shownNumber !== null && m.versions.length > 0 && (
+            <span>
+              No palco: versão {m.shownNumber} ({m.shownTime})
+            </span>
+          )}
+          {m.since && <span className="take-since">{m.since}</span>}
+        </p>
+        {m.pending && <div className={`progress-bar${m.latest?.status === "queued" ? " is-static" : ""}`} aria-hidden="true" />}
+        {scene.notice && <p className="notice">{scene.notice}</p>}
+        {m.failure && (
+          <div className="take-failure">
+            {m.latest?.status === "blocked" ? <BlockIcon /> : <AlertIcon />}
+            <p>
+              {m.failure}
+              {reviewing && " Use “Regerar” para tentar de novo."}
+            </p>
           </div>
         )}
+
+        {m.versions.length > 0 && <VersionPicker m={m} sceneNumber={n} onPick={setSelectedId} />}
 
         {reviewing && (
           <>
-            <div className="row">
+            <div className="take-actions">
+              {m.approved ? (
+                <span className="badge badge-done badge-lg">
+                  <CheckIcon />
+                  Versão aprovada
+                </span>
+              ) : !m.shown ? null : (
+                <button
+                  type="button"
+                  disabled={!m.canApprove}
+                  onClick={() => void run(() => api(`/api/scenes/${scene.id}/approve`, { body: { attemptId: m.shown!.id } }))}
+                >
+                  Aprovar esta versão
+                </button>
+              )}
               <button
-                disabled={working || !shown || shown.status !== "done" || Boolean(approved)}
-                onClick={() =>
-                  void run(() => api(`/api/scenes/${scene.id}/approve`, { body: { attemptId: shown!.id } }))
-                }
-              >
-                Aprovar esta versão
-              </button>
-              <button
+                type="button"
                 className="secondary"
-                disabled={working || pending}
+                disabled={!m.canRegenerate}
+                aria-expanded={editing}
+                aria-controls={editing ? promptId : undefined}
                 onClick={() => {
-                  if (!editing) setPrompt(latest?.prompt ?? scene.visualPrompt);
+                  if (!editing) setPrompt(m.promptSeed);
                   setEditing((v) => !v);
                 }}
               >
                 Ajustar prompt
               </button>
               <button
-                className="secondary"
-                disabled={working || pending}
+                type="button"
+                className={regeneratePrimary ? undefined : "secondary"}
+                disabled={!m.canRegenerate}
                 onClick={async () => {
-                  if (!(await confirm(confirmTexts.regenerateScene(index + 1, editing)))) return;
+                  if (!(await confirm(confirmTexts.regenerateScene(n, editing)))) return;
                   void run(async () => {
                     await api(`/api/scenes/${scene.id}/regenerate`, { body: editing ? { prompt } : {} });
                     setSelectedId(null);
@@ -108,35 +216,72 @@ function SceneCard({ scene, index, run, working, reviewing }: Pick<PanelProps, "
                 Regerar{editing ? " com este prompt" : ""}
               </button>
             </div>
+            {m.pending && <p className="hint">Aguarde a nova versão ficar pronta para regerar ou ajustar o prompt.</p>}
             {editing && (
-              <textarea aria-label="Prompt da cena" style={{ minHeight: 140 }} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+              <div className="field take-prompt" id={promptId}>
+                <label htmlFor={`${uid}-prompt-campo`}>Prompt da cena {n}</label>
+                <textarea id={`${uid}-prompt-campo`} aria-label="Prompt da cena" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+                <p className="hint">A nova versão usa este texto. As versões anteriores continuam disponíveis.</p>
+              </div>
             )}
           </>
         )}
       </div>
-    </div>
+    </li>
   );
 }
 
 export function ScenesPanel({ snap, run, working }: PanelProps) {
   const { project, scenes } = snap;
+  const uid = useId();
   const reviewing = project.stage === "review";
-  const approvedCount = scenes.filter((s) => s.approvedAttemptId).length;
-  // Conta a tentativa ATUAL (a mais recente) de cada cena; versões antigas prontas não contam.
-  const doneCount = scenes.filter((s) => s.attempts[s.attempts.length - 1]?.status === "done").length;
+  // "Prontas" conta a tentativa ATUAL (a mais recente) de cada cena; versões antigas prontas não contam.
+  const counts = countScenes(scenes);
+  const assemble = assembleState(counts, working);
+  const nextUp = reviewing ? nextUpIndex(scenes) : -1;
   const confirm = useConfirm();
+  const reasonId = `${uid}-montar-motivo`;
 
   return (
-    <div className="stack">
-      <div className="card row" style={{ justifyContent: "space-between" }}>
-        <span>
-          {reviewing
-            ? `${approvedCount} de ${scenes.length} cenas aprovadas`
-            : `Gerando cenas: ${doneCount} de ${scenes.length} prontas`}
-        </span>
-        {reviewing && (
-          <span className="row">
+    <div className={`stack stack-lg takes-panel${reviewing ? " is-review" : " is-generating"}`}>
+      {!reviewing && (
+        <div className="panel gen-status">
+          <p className="gen-count tabular" aria-live="polite">
+            {readyText(counts)}
+          </p>
+          <progress className="meter-bar" max={counts.total} value={counts.ready} aria-label="Cenas prontas" />
+          <p className="hint">A tela muda sozinha para a revisão quando todas terminarem.</p>
+        </div>
+      )}
+
+      {reviewing && snap.assembleError && (
+        <div className="alert" role="alert">
+          <AlertIcon />
+          <span>A montagem falhou: {snap.assembleError}</span>
+        </div>
+      )}
+
+      <ol className="takes" aria-label="Cenas">
+        {scenes.map((s, i) => (
+          <SceneCard key={s.id} scene={s} index={i} run={run} working={working} reviewing={reviewing} framed={i === nextUp} />
+        ))}
+      </ol>
+
+      {reviewing && (
+        <div className="action-bar review-bar">
+          <div className="action-bar-status">
+            <p className="tabular review-count" aria-live="polite">
+              {approvedText(counts)}
+            </p>
+            {assemble.reason && (
+              <p id={reasonId} className="hint">
+                {assemble.reason}
+              </p>
+            )}
+          </div>
+          <div className="action-bar-actions">
             <button
+              type="button"
               className="secondary"
               disabled={working}
               onClick={async () => {
@@ -147,18 +292,16 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
               Regerar todas
             </button>
             <button
-              disabled={working || approvedCount !== scenes.length}
+              type="button"
+              disabled={!assemble.canAssemble}
+              aria-describedby={assemble.reason ? reasonId : undefined}
               onClick={() => void run(() => api(`/api/projects/${project.id}/assemble`, { method: "POST", body: {} }))}
             >
               Montar vídeo final
             </button>
-          </span>
-        )}
-      </div>
-      {reviewing && snap.assembleError && <div className="error" role="alert">A montagem falhou: {snap.assembleError}</div>}
-      {scenes.map((s, i) => (
-        <SceneCard key={s.id} scene={s} index={i} run={run} working={working} reviewing={reviewing} />
-      ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
