@@ -204,14 +204,36 @@ strong { font-weight: 600; }
 
 /* Palco: fundo de mídia 9:16 */
 .stage { background: var(--color-stage); border-radius: var(--radius-media); overflow: hidden; }
-img.thumb {
+/* Quadro 9:16 sobre o palco (imagens de referência e de personagens): reserva o espaço antes de carregar. */
+.media-frame {
+  position: relative;
+  display: grid;
+  place-items: center;
   width: 100%;
   aspect-ratio: 9 / 16;
-  object-fit: cover;
+  overflow: hidden;
   border-radius: var(--radius-media);
   background: var(--color-stage);
 }
-div.thumb { width: 100%; aspect-ratio: 9 / 16; border-radius: var(--radius-media); background: var(--color-stage); padding: var(--space-3); text-align: center; }
+.media-frame > img { width: 100%; height: 100%; object-fit: contain; }
+.media-frame.is-dimmed > img { opacity: 0.2; }
+.media-caption { color: var(--color-text-muted); font-size: var(--text-sm); }
+.media-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: center;
+}
+.media-state.is-work { color: var(--color-progress); }
+.media-state.is-work .progress-bar { width: min(140px, 70%); }
+.media-state.is-bad { color: var(--color-danger); }
 video.clip {
   width: 100%;
   max-width: 280px;
@@ -271,6 +293,14 @@ div.error, p.error, .alert {
   background: var(--color-accent);
   -webkit-mask: var(--icon-warning) center / contain no-repeat;
   mask: var(--icon-warning) center / contain no-repeat;
+}
+/* Aviso por cena no roteiro: bloco com fundo (a revisão, Fase B2, mantém o aviso em linha) */
+.scene-editor .notice {
+  max-width: none;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-control);
+  background: var(--color-accent-soft);
 }
 
 /* ---------- Selos ---------- */
@@ -565,26 +595,206 @@ a.brand:hover { color: var(--color-text); }
 .meter-work > .is-current { background: var(--color-progress); }
 .meter-done > span { background: var(--color-success); }
 
-/* ---------- Etapas (compatibilidade; a Fase B redesenha a linha do tempo) ---------- */
-.steps { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-4) 0 var(--space-5); }
-button.step {
-  min-height: 36px;
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-badge);
-  background: transparent;
+/* ---------- Projeto: trilha, título e etapa ---------- */
+.breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-2);
+  margin: 0 0 var(--space-1);
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.breadcrumb li { display: flex; align-items: center; min-width: 0; }
+.breadcrumb li + li::before { content: "/"; margin-right: var(--space-2); color: var(--color-text-disabled); }
+.breadcrumb a { display: inline-flex; align-items: center; min-height: 32px; color: var(--color-text-muted); font-weight: 500; }
+.breadcrumb a:hover { color: var(--color-text); }
+.breadcrumb [aria-current="page"] { max-width: 48ch; overflow: hidden; color: var(--color-text); text-overflow: ellipsis; white-space: nowrap; }
+.project-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+
+.stage-section { display: grid; gap: var(--space-5); }
+.stage-section > * { min-width: 0; }
+.stage-head { display: grid; gap: var(--space-1); }
+.stage-head h2:focus { outline: none; } /* foco programático ao mudar de etapa (leitores de tela) */
+.stage-section > .alert { margin: 0; }
+
+/* ---------- Linha do tempo das etapas: segmentos numa trilha, cabeçote na etapa atual ---------- */
+.timeline { margin: var(--space-5) 0 var(--space-6); }
+.timeline-track {
+  position: relative;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(112px, 1fr);
+  gap: 3px;
+  margin: 0;
+  padding: 16px 0 0; /* espaço para o cabeçote acima da trilha */
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+.timeline-step { position: relative; min-width: 0; border-top: 4px solid var(--color-text-muted); }
+.timeline-step.is-upcoming, .timeline-step.is-locked:not(:has(button)) { border-top-color: var(--color-border); }
+.timeline-step.is-current { border-top-color: var(--color-accent); }
+.is-machine .timeline-step.is-current { border-top-color: var(--color-progress); }
+.is-finished .timeline-step.is-current { border-top-color: var(--color-success); }
+/* Cabeçote: haste + cabeça pentagonal, como o indicador de posição de um editor de vídeo */
+.timeline-step.is-current::before,
+.timeline-step.is-current::after { content: ""; position: absolute; left: 0; background: var(--color-accent); pointer-events: none; }
+.timeline-step.is-current::before { top: -12px; width: 3px; height: 26px; border-radius: 0 0 2px 2px; }
+.timeline-step.is-current::after { top: -17px; left: -4px; width: 11px; height: 9px; clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%); }
+.is-machine .timeline-step.is-current::before, .is-machine .timeline-step.is-current::after { background: var(--color-progress); }
+.is-finished .timeline-step.is-current::before, .is-finished .timeline-step.is-current::after { background: var(--color-success); }
+
+.timeline-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: var(--target);
+  padding: var(--space-2);
   color: var(--color-text-muted);
   font-size: var(--text-sm);
   font-weight: 500;
+  line-height: 1.25;
+  text-align: left;
 }
-button.step:hover:not(:disabled) { background: var(--color-surface-raised); border-color: var(--color-border-control); color: var(--color-text); }
-button.step.past { color: var(--color-success); border-color: var(--color-success-soft); }
-button.step.current { background: var(--color-accent-soft); border-color: var(--color-accent); color: var(--color-accent); font-weight: 600; }
-button.step:disabled { opacity: 1; cursor: default; }
-button.step:not(.past):not(.current):disabled { color: var(--color-text-disabled); border-style: dashed; }
+.timeline-number { font-weight: 600; }
+.timeline-label { min-width: 0; }
+.timeline-icon { width: 1.1em; height: 1.1em; }
+.timeline-icon.is-check { color: var(--color-success); }
+.is-current > .timeline-item { color: var(--color-text); font-weight: 600; }
+.is-available > .timeline-item, .is-completed > .timeline-item { color: var(--color-text); }
+button.timeline-item {
+  justify-content: flex-start;
+  min-width: 0;
+  border: 0;
+  border-radius: 0 0 var(--radius-control) var(--radius-control);
+  background: transparent;
+  color: var(--color-text);
+  font-weight: 500;
+}
+button.timeline-item:hover:not(:disabled) { background: var(--color-surface); border-color: transparent; color: var(--color-text); }
+button.timeline-item:disabled { background: transparent; border-color: transparent; color: var(--color-text-muted); }
+button.timeline-item:focus-visible { outline-offset: -2px; }
+.timeline-notes {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+.timeline-notes li { max-width: 68ch; }
 
-/* Legado (Fase B substitui) */
-.topbar { display: flex; justify-content: flex-end; margin-bottom: var(--space-2); }
+/* ---------- Barra de ação da etapa e alterações não salvas ---------- */
+.action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+}
+.action-bar-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4); min-width: 0; margin: 0; }
+.action-bar > button { margin-left: auto; }
+@media (max-width: 559px) {
+  .action-bar > button { width: 100%; }
+}
+.unsaved { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--color-accent); font-size: var(--text-sm); font-weight: 500; }
+.unsaved::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.unsaved:empty { position: absolute; } /* fica no DOM (região de status), sem ocupar espaço */
+.unsaved:empty::before { display: none; }
+.save-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.save-row:not(:has(button)) { display: contents; }
+.save-row .hint { flex-basis: 100%; }
+button.button-sm { min-height: 36px; padding: 6px 12px; font-size: var(--text-sm); }
+
+/* Estado vazio (cantos de visor) e trabalho da máquina */
+.empty-state { max-width: 640px; }
+@media (min-width: 720px) {
+  .empty-state { padding: var(--space-6); }
+}
+.work-panel p { color: var(--color-text); }
+
+/* ---------- Briefing ---------- */
+.briefing-layout { display: grid; gap: var(--space-5); align-items: start; }
+.briefing-layout > * { min-width: 0; }
+.briefing-layout:not(.has-references) { max-width: 760px; }
+@media (min-width: 960px) {
+  .briefing-layout.has-references { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+}
+textarea.copy-input { min-height: 280px; }
+@media (min-width: 960px) {
+  .has-references textarea.copy-input { min-height: 420px; }
+}
+.ref-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: var(--space-4) var(--space-3);
+  margin-inline: 0;
+  margin-block-end: 0; /* a margem de cima vem do .stack (sempre segue outro bloco) */
+  padding: 0;
+  list-style: none;
+}
+.ref { display: grid; gap: var(--space-2); align-content: start; min-width: 0; }
+.ref-caption { display: grid; gap: var(--space-1); justify-items: start; }
+.ref-label { font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
+.upload {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+}
+.upload-preview { border: 1px dashed var(--color-border-control); }
+/* O nome do arquivo escolhido quebra a linha em vez de ser cortado em telas estreitas */
+.upload input[type="file"] { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 479px) {
+  .upload { grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-3); padding: var(--space-3); }
+}
+.upload-preview:has(img) { border-style: solid; border-color: var(--color-border); }
+
+/* ---------- Personagens ---------- */
+.cast-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
+  gap: var(--space-4);
+  align-items: start;
+  margin-inline: 0;
+  margin-block-end: 0; /* a margem de cima vem do .stack (sempre segue outro bloco) */
+  padding: 0;
+  list-style: none;
+}
+.cast-card { display: grid; gap: var(--space-3); align-content: start; min-width: 0; }
+.cast-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.cast-card-head h3 { min-width: 0; overflow-wrap: anywhere; }
+.cast-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.cast-actions button { min-height: 36px; padding: 6px 12px; font-size: var(--text-sm); }
+.cast-card textarea { min-height: 120px; }
+.cast-add { border-style: dashed; border-color: var(--color-border-control); background: transparent; }
+
+/* ---------- Roteiro ---------- */
+.script-layout { display: grid; gap: var(--space-5); align-items: start; }
+.script-layout > * { min-width: 0; }
+@media (min-width: 960px) {
+  .script-layout { grid-template-columns: 300px minmax(0, 1fr); }
+  .script-aside { position: sticky; top: var(--space-5); }
+}
+.scene-list { display: grid; gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.scene-editor { display: grid; gap: var(--space-4); }
+.scene-editor-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-4); }
+.scene-editor-foot { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-3) var(--space-4); }
+.field-seconds { width: 140px; }
+
 
 /* ---------- Carregando ---------- */
 .skeleton { background: var(--color-surface); border-radius: var(--radius-control); }

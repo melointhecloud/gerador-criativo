@@ -267,7 +267,7 @@ No celular, a revisão empilha: palco 9:16 em largura total (no máximo 70% da a
 - **Linha do tempo (Fase B):** o `<nav aria-label="Etapas do projeto">` vira uma régua de timeline. Cada etapa é um segmento com número (a sequência é real) e nome.
   - **Atual:** o cabeçote (barra vertical de tungstênio) sobre o segmento, texto em Papel com peso 600, `aria-current="step"`.
   - **Concluída:** ícone de visto + texto em Papel; quando dá para voltar, é um botão com hover e foco.
-  - **Travada:** ícone de cadeado + o motivo **escrito** logo abaixo da régua ("Aguarde as gerações terminarem para voltar a uma etapa anterior."), não só cinza nem só `title`. O botão segue `disabled` (comportamento atual).
+  - **Travada:** ícone de cadeado no segmento + o motivo **escrito** logo abaixo da régua ("Aguarde as gerações terminarem para voltar a uma etapa anterior."; a próxima etapa diz o que a libera: "Roteiro: disponível depois de aprovar todos os personagens."), não só cinza nem só `title`. O botão segue `disabled` (comportamento atual) e aponta para o motivo com `aria-describedby`. As linhas de motivo são só texto: o cadeado fica no segmento.
   - **Futura:** contorno tracejado, texto secundário, não focável.
 - O link "← Projetos" vira uma trilha "Projetos / Nome do projeto" dentro de um `<nav aria-label="Trilha">`.
 
@@ -312,6 +312,7 @@ O primeiro rascunho, e o que mudou:
 5. **Rótulos e metadados.** Cortados os rótulos de seção em caixa alta, o "·" entre metadados e a monoespaçada que eu tinha posto em horários e contagens (trocada por algarismos tabulares da própria Archivo).
 6. **Ousadia em um lugar só: o enquadramento 9:16.** Cantos de visor (marcas de enquadramento em Tungstênio) aparecem só em volta do que é protagonista na tela: o formulário do login, o convite da lista vazia e, na Fase B, o palco do clipe em revisão e o vídeo final. O medidor 9:16 de cada projeto na lista é a versão miniatura do mesmo quadro. O resto fica quieto.
 7. **Espelho (tirar um acessório).** Depois das primeiras capturas: (a) saiu o sublinhado em tungstênio do item "Projetos" no cabeçalho (competia com as marcas de enquadramento e com a ação principal; o item atual agora só fica em Papel com peso 600); (b) o botão principal desabilitado deixou de ser um tungstênio translúcido (parecia quebrado) e virou neutro.
+8. **Espelho na Fase B1 (stepper, briefing, personagens, roteiro).** Depois das capturas: (a) saiu o cadeado repetido nas linhas de motivo abaixo da régua (o segmento já tem o cadeado; três cadeados e mais dois nas notas viravam ruído); (b) o cartão de personagem deixou de mostrar o selo "Gerando imagem"/"Imagem falhou", que repetia o texto já escrito sobre a imagem: o selo agora só diz a aprovação ("Para aprovar"/"Aprovado"); (c) a imagem antiga fica apagada (20%) enquanto gera de novo ou depois de falhar, porque o texto em Corte sobre uma imagem vermelha ficava ilegível; (d) os botões do cartão ficaram no tamanho compacto (36 px) para não empilhar um por linha na coluna de 250 px.
 
 ## 10. Melhorias de usabilidade para a Fase B
 

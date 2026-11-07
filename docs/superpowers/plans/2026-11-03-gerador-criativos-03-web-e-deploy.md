@@ -2219,465 +2219,31 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
 - [ ] **Step 3: `ProjectView` e barra de etapas**
 
-`src/components/ProjectView.tsx`:
-```tsx
-"use client";
-import Link from "next/link";
-import { useState } from "react";
-import { stagesFor, type Stage } from "@/domain/stages";
-import { api } from "@/lib/api";
-import { STAGE_LABELS } from "@/lib/labels";
-import { useProject } from "@/lib/useProject";
-import { BriefingPanel } from "./BriefingPanel";
-import { CharactersPanel } from "./CharactersPanel";
-import { DonePanel } from "./DonePanel";
-import { ScenesPanel } from "./ScenesPanel";
-import { ScriptPanel } from "./ScriptPanel";
+`src/components/ProjectView.tsx`: o código completo está no próprio arquivo do repositório (redesenho da Fase B1; direção em `docs/design/direction.md`, seções 5, 6 e 10). Resumo: `ConfirmProvider` acima de tudo; `run()` com lock de ação única (o erro vai para um `.alert` com `role="alert"`); trilha `<nav aria-label="Trilha">` "Projetos / nome" e selo do modo ao lado do `h1`; linha do tempo `StageTimeline` alimentada por `buildStepper()`; título da etapa (`h2`, `tabIndex={-1}`) recebe o foco quando a etapa muda (sem salto de rolagem; com movimento reduzido, rolagem instantânea); região `aria-live="polite"` com `progressMessage()`. As chamadas à API e as transições não mudaram.
 
-export function ProjectView({ id }: { id: string }) {
-  const { snap, loadError, reload } = useProject(id);
-  const [error, setError] = useState<string | null>(null);
-  const [working, setWorking] = useState(false);
+Arquivos novos da Fase B1 (código completo no repositório):
 
-  // Toda ação do usuário passa por aqui: um pedido por vez (evita clique duplo em ações pagas) e o erro vai para a tela.
-  async function run(fn: () => Promise<unknown>) {
-    setWorking(true);
-    setError(null);
-    try {
-      await fn();
-      await reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      await reload();
-    } finally {
-      setWorking(false);
-    }
-  }
+- `src/lib/stepper.ts`: modelo puro da linha do tempo (`buildStepper`, `backLockReason`). Mesma regra de antes: voltar só para etapas editáveis e nunca durante `generating`/`assembling` nem na revisão com `hasPendingGenerations`; avançar só pelas ações de cada painel. Testes em `tests/lib/stepper.test.ts` (inclui "toda etapa disponível é uma transição que `canTransition` aceita").
+- `src/lib/flow.ts`: funções puras das telas (`isDirty`, `formatCharCount`, `characterActions`, `progressMessage`, `guardedDestination`). Testes em `tests/lib/flow.test.ts`.
+- `src/lib/useUnsavedGuard.ts`: aviso de alterações não salvas no briefing (`beforeunload` + interceptação de links internos com o diálogo de confirmação); os ouvintes só existem enquanto há edição pendente. Sem salvamento automático e sem chamadas novas à API.
+- `src/components/StageTimeline.tsx`: a régua de etapas (`<nav aria-label="Etapas do projeto">` com `<ol>`), estados atual/concluída/disponível/travada/futura e os motivos escritos abaixo da régua.
+- `src/components/UnsavedBadge.tsx`: "Alterações não salvas" (região `role="status"` sempre presente).
 
-  if (!snap) return <p className={loadError ? "error" : "muted"}>{loadError ?? "Carregando…"}</p>;
-
-  const { project } = snap;
-  const stages = stagesFor(project.mode);
-  const currentIndex = stages.indexOf(project.stage);
-  // A API só aceita voltar para etapas navegáveis, e só o worker tira o projeto de `generating`.
-  // Em revisão, também não dá para voltar enquanto uma regeração está na fila ou rodando.
-  const hasPending = snap.hasPendingGenerations;
-  const canGoBack = project.stage !== "generating" && project.stage !== "assembling" && !(project.stage === "review" && hasPending);
-  const goTo = (stage: Stage) => run(() => api(`/api/projects/${id}/stage`, { body: { stage } }));
-
-  return (
-    <>
-      <p className="muted">
-        <Link href="/">← Projetos</Link>
-      </p>
-      <h1>
-        {project.name} <span className="badge">{project.mode === "ugc" ? "UGC" : "Novelinha"}</span>
-      </h1>
-
-      <div className="steps">
-        {stages.map((s, i) => {
-          const past = i < currentIndex;
-          const clickable = past && canGoBack && s !== "generating" && s !== "assembling";
-          return (
-            <button
-              key={s}
-              className={`step ${i === currentIndex ? "current" : past ? "past" : ""}`}
-              style={{ cursor: clickable ? "pointer" : "default" }}
-              disabled={!clickable || working}
-              title={past && !canGoBack && hasPending ? "Aguarde as gerações em andamento" : undefined}
-              aria-current={i === currentIndex ? "step" : undefined}
-              onClick={() => void goTo(s)}
-            >
-              {STAGE_LABELS[s]}
-            </button>
-          );
-        })}
-      </div>
-
-      {(error || loadError) && <div className="error" role="alert">{error ?? loadError}</div>}
-
-      {project.stage === "briefing" && <BriefingPanel snap={snap} run={run} working={working} />}
-      {project.stage === "characters" && <CharactersPanel snap={snap} run={run} working={working} />}
-      {project.stage === "script" && <ScriptPanel snap={snap} run={run} working={working} />}
-      {(project.stage === "generating" || project.stage === "review") && (
-        <ScenesPanel snap={snap} run={run} working={working} />
-      )}
-      {project.stage === "assembling" && (
-        <div className="card">Montando o vídeo final… isso leva alguns segundos.</div>
-      )}
-      {project.stage === "done" && <DonePanel snap={snap} run={run} working={working} />}
-    </>
-  );
-}
-```
 
 - [ ] **Step 4: Painel de briefing**
 
-`src/components/BriefingPanel.tsx`:
-```tsx
-"use client";
-import { useRef, useState } from "react";
-import { api } from "@/lib/api";
-import type { PanelProps } from "@/lib/types";
+`src/components/BriefingPanel.tsx`: código completo no repositório. Copy e referências lado a lado a partir de 960 px (empilhado abaixo); contador de caracteres; miniaturas e prévia local (URL `blob:`) em quadros 9:16 sobre o palco; erros de arquivo/rótulo junto do campo (`role="alert"`, `aria-invalid`, `aria-describedby`); "Continuar…" com o motivo quando desabilitado; "Alterações não salvas" + `useUnsavedGuard` (o nome e a copy continuam sendo salvos só em "Continuar…", como antes).
 
-export function BriefingPanel({ snap, run, working }: PanelProps) {
-  const { project, references } = snap;
-  const [name, setName] = useState(project.name);
-  const [copy, setCopy] = useState(project.copy);
-  const [label, setLabel] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
-  const isUgc = project.mode === "ugc";
-
-  const saveBriefing = () => api(`/api/projects/${project.id}`, { method: "PATCH", body: { name, copy } });
-
-  async function upload() {
-    const file = fileRef.current?.files?.[0];
-    if (!file || !label.trim()) throw new Error("Escolha uma imagem e dê um rótulo (ex.: produto, pessoa)");
-    const form = new FormData();
-    form.set("label", label);
-    form.set("file", file);
-    await api(`/api/projects/${project.id}/references`, { form });
-    setLabel("");
-    if (fileRef.current) fileRef.current.value = "";
-  }
-
-  return (
-    <div className="stack">
-      <div className="card stack">
-        <label>
-          Nome
-          <input aria-label="Nome" value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label>
-          Copy / storytelling
-          <textarea
-            aria-label="Copy / storytelling"
-            style={{ minHeight: 200 }}
-            value={copy}
-            onChange={(e) => setCopy(e.target.value)}
-            placeholder="Cole aqui a copy ou a história do criativo"
-          />
-        </label>
-      </div>
-
-      {isUgc && (
-        <div className="card stack">
-          <strong>Imagens de referência</strong>
-          <p className="muted">
-            O produto e/ou a pessoa que devem aparecer. O rótulo (ex.: “produto”) é como o roteiro se refere à imagem.
-          </p>
-          <div className="grid">
-            {references.map((r) => (
-              <div key={r.id} className="stack">
-                <img className="thumb" src={`/api/assets/${r.id}`} alt={r.label ?? "Imagem de referência"} />
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <span>{r.label}</span>
-                  <button
-                    className="secondary"
-                    disabled={working}
-                    onClick={() => {
-                      if (!window.confirm(`Remover a referência “${r.label ?? "sem rótulo"}”? As cenas que a usam vão avisar que perderam a referência.`)) return;
-                      void run(() => api(`/api/assets/${r.id}`, { method: "DELETE" }));
-                    }}
-                  >
-                    Remover
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="row">
-            <input
-              ref={fileRef}
-              aria-label="Arquivo de imagem"
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              style={{ flex: 2 }}
-            />
-            <input
-              aria-label="Rótulo da imagem"
-              placeholder="Rótulo (ex.: produto)"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              style={{ flex: 1 }}
-            />
-            <button className="secondary" disabled={working} onClick={() => void run(upload)}>
-              Enviar
-            </button>
-          </div>
-        </div>
-      )}
-
-      <button
-        disabled={working || !copy.trim()}
-        onClick={() =>
-          void run(async () => {
-            await saveBriefing();
-            await api(`/api/projects/${project.id}/stage`, { body: { stage: isUgc ? "script" : "characters" } });
-          })
-        }
-      >
-        {isUgc ? "Continuar para o roteiro" : "Continuar para os personagens"}
-      </button>
-    </div>
-  );
-}
-```
 
 - [ ] **Step 5: Painel de personagens**
 
-`src/components/CharactersPanel.tsx`:
-```tsx
-"use client";
-import { useState } from "react";
-import { api } from "@/lib/api";
-import type { PanelProps, ProjectView } from "@/lib/types";
+`src/components/CharactersPanel.tsx`: código completo no repositório. Cartões com a imagem 9:16 no palco e os estados "Gerando imagem…" (barra em Luz do dia) e "Falhou: …"; selo só da aprovação. Correções: a `key` do `CharacterCard` é só o `id` (antes incluía `assetId` e remontava o cartão, perdendo texto não salvo, quando uma imagem terminava) e o formulário volta aos valores do servidor só quando o nome/aparência salvos mudam; "Aprovar" e "Regerar imagem" ficam desabilitados enquanto há edição não salva, com o motivo (`characterActions`); confirmação antes de "Regerar imagem", "Adicionar personagem" e do primeiro "Sugerir personagens" (textos em `src/lib/confirmTexts.ts`).
 
-type Character = ProjectView["characters"][number];
-
-function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> & { c: Character }) {
-  const [name, setName] = useState(c.name);
-  const [description, setDescription] = useState(c.description);
-  const dirty = name !== c.name || description !== c.description;
-
-  return (
-    <div className="card stack">
-      {c.assetId ? (
-        <img className="thumb" src={`/api/assets/${c.assetId}`} alt={c.name} />
-      ) : (
-        <div className="thumb row" style={{ justifyContent: "center" }}>
-          <span className="muted">{c.imageStatus === "failed" ? `Falhou: ${c.imageError ?? ""}` : "Gerando imagem…"}</span>
-        </div>
-      )}
-      <input aria-label="Nome do personagem" value={name} onChange={(e) => setName(e.target.value)} />
-      <textarea aria-label="Aparência do personagem" value={description} onChange={(e) => setDescription(e.target.value)} />
-      <div className="row">
-        {dirty && (
-          <button
-            disabled={working}
-            onClick={() =>
-              void run(() => api(`/api/characters/${c.id}`, { method: "PATCH", body: { name, description } }))
-            }
-          >
-            Salvar
-          </button>
-        )}
-        <button
-          className="secondary"
-          disabled={working || c.imageStatus === "pending"}
-          onClick={() => void run(() => api(`/api/characters/${c.id}/regenerate`, { method: "POST", body: {} }))}
-        >
-          Regerar imagem
-        </button>
-        <button
-          className={c.approved ? "" : "secondary"}
-          disabled={working || c.approved || c.imageStatus !== "ready" || dirty}
-          onClick={() => void run(() => api(`/api/characters/${c.id}/approve`, { method: "POST", body: {} }))}
-        >
-          {c.approved ? "Aprovado ✓" : "Aprovar"}
-        </button>
-        <button
-          className="secondary"
-          disabled={working}
-          onClick={() => {
-            if (!confirm(`Remover o personagem “${c.name}”? As cenas que o usam vão avisar que perderam a referência.`)) return;
-            void run(() => api(`/api/characters/${c.id}`, { method: "DELETE" }));
-          }}
-        >
-          Remover
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export function CharactersPanel({ snap, run, working }: PanelProps) {
-  const { project, characters } = snap;
-  const [newName, setNewName] = useState("");
-  const [newDescription, setNewDescription] = useState("");
-  const allApproved = characters.length > 0 && characters.every((c) => c.approved);
-
-  return (
-    <div className="stack">
-      <div className="card row" style={{ justifyContent: "space-between" }}>
-        <span>
-          {characters.length === 0
-            ? "Gere os personagens a partir da copy. Você poderá editar, regerar e aprovar cada um."
-            : `${characters.filter((c) => c.approved).length} de ${characters.length} personagens aprovados`}
-        </span>
-        <button
-          className={characters.length ? "secondary" : ""}
-          disabled={working}
-          onClick={() => {
-            if (characters.length && !confirm("Isso substitui todos os personagens atuais. Continuar?")) return;
-            void run(() => api(`/api/projects/${project.id}/characters/propose`, { method: "POST", body: {} }));
-          }}
-        >
-          {working ? "Trabalhando…" : characters.length ? "Sugerir de novo" : "Sugerir personagens"}
-        </button>
-      </div>
-
-      <div className="grid">
-        {characters.map((c) => (
-          <CharacterCard key={`${c.id}:${c.name}:${c.description}:${c.assetId}`} c={c} run={run} working={working} />
-        ))}
-      </div>
-
-      <div className="card stack">
-        <strong>Adicionar personagem</strong>
-        <input aria-label="Nome" placeholder="Nome" value={newName} onChange={(e) => setNewName(e.target.value)} />
-        <textarea
-          aria-label="Aparência"
-          placeholder="Aparência: idade, rosto, cabelo, roupa…"
-          value={newDescription}
-          onChange={(e) => setNewDescription(e.target.value)}
-        />
-        <button
-          className="secondary"
-          disabled={working || !newName.trim() || !newDescription.trim()}
-          onClick={() =>
-            void run(async () => {
-              await api(`/api/projects/${project.id}/characters`, { body: { name: newName, description: newDescription } });
-              setNewName("");
-              setNewDescription("");
-            })
-          }
-        >
-          Adicionar
-        </button>
-      </div>
-
-      <button
-        disabled={working || !allApproved}
-        onClick={() => void run(() => api(`/api/projects/${project.id}/stage`, { body: { stage: "script" } }))}
-      >
-        Continuar para o roteiro
-      </button>
-    </div>
-  );
-}
-```
 
 - [ ] **Step 6: Painel de roteiro**
 
-`src/components/ScriptPanel.tsx`:
-```tsx
-"use client";
-import { useState } from "react";
-import { api } from "@/lib/api";
-import type { PanelProps, ProjectView } from "@/lib/types";
+`src/components/ScriptPanel.tsx`: código completo no repositório. Coluna "Pedir ajustes ao roteiro" (fixa ao rolar no desktop) com a confirmação de descarte; cenas com rótulos visíveis (fala, descrição visual, duração), `notice` como aviso e "Alterações não salvas" junto de "Salvar cena". A `key` de remontagem do `SceneEditor` (`id:fala:prompt:segundos`) não mudou. Barra de ação com os números da API (`scenesToGenerate` de N cenas, `estimatedSeconds`) e o botão por caso: "Ir para a revisão" sem custo, senão "Gerar N cenas (X s)" com confirmação.
 
-type Scene = ProjectView["scenes"][number];
-
-function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "working"> & { scene: Scene; index: number }) {
-  const [dialogue, setDialogue] = useState(scene.dialogue);
-  const [visualPrompt, setVisualPrompt] = useState(scene.visualPrompt);
-  const [seconds, setSeconds] = useState(String(scene.targetSeconds));
-  const dirty =
-    dialogue !== scene.dialogue || visualPrompt !== scene.visualPrompt || Number(seconds) !== scene.targetSeconds;
-
-  return (
-    <div className="card stack">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <strong>Cena {index + 1}</strong>
-        <span className="muted">
-          {scene.references.length ? `Usa: ${scene.references.map((r) => r.label).join(", ")}` : "Sem imagens de referência"}
-        </span>
-      </div>
-      <label>
-        Fala
-        <textarea aria-label={`Fala da cena ${index + 1}`} value={dialogue} onChange={(e) => setDialogue(e.target.value)} />
-      </label>
-      <label>
-        Descrição visual
-        <textarea aria-label={`Descrição visual da cena ${index + 1}`} value={visualPrompt} onChange={(e) => setVisualPrompt(e.target.value)} />
-      </label>
-      <label style={{ maxWidth: 140 }}>
-        Duração (s)
-        <input aria-label={`Duração da cena ${index + 1} (s)`} type="number" min={3} step={1} value={seconds} onChange={(e) => setSeconds(e.target.value)} />
-      </label>
-      {scene.notice && <div className="notice">{scene.notice}</div>}
-      {dirty && (
-        <button
-          disabled={working}
-          onClick={() =>
-            void run(() =>
-              api(`/api/scenes/${scene.id}`, {
-                method: "PATCH",
-                body: { dialogue, visualPrompt, targetSeconds: Number(seconds) },
-              }),
-            )
-          }
-        >
-          Salvar cena
-        </button>
-      )}
-    </div>
-  );
-}
-
-export function ScriptPanel({ snap, run, working }: PanelProps) {
-  const { project, scenes, estimatedSeconds, scenesToGenerate } = snap;
-  const [feedback, setFeedback] = useState("");
-  const hasScenes = scenes.length > 0;
-
-  return (
-    <div className="stack">
-      <div className="card stack">
-        <strong>{hasScenes ? "Pedir ajustes ao roteiro" : "Gerar roteiro a partir da copy"}</strong>
-        {hasScenes && (
-          <textarea
-            aria-label="Ajustes ao roteiro"
-            placeholder="Ex.: tire a cena 3, deixe a abertura mais curta, mais emoção no final…"
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-          />
-        )}
-        <button
-          className={hasScenes ? "secondary" : ""}
-          disabled={working || (hasScenes && !feedback.trim())}
-          onClick={() => {
-            if (hasScenes && !confirm("Reescrever o roteiro descarta as edições manuais e as cenas já geradas. Continuar?")) return;
-            void run(async () => {
-              await api(`/api/projects/${project.id}/script/plan`, { body: { feedback: feedback.trim() || undefined } });
-              setFeedback("");
-            });
-          }}
-        >
-          {working ? "Trabalhando…" : hasScenes ? "Reescrever com estes ajustes" : "Gerar roteiro"}
-        </button>
-      </div>
-
-      {scenes.map((s, i) => (
-        <SceneEditor key={`${s.id}:${s.dialogue}:${s.visualPrompt}:${s.targetSeconds}`} scene={s} index={i} run={run} working={working} />
-      ))}
-
-      {hasScenes && (
-        <div className="card row" style={{ justifyContent: "space-between" }}>
-          <span>
-            {scenesToGenerate === 0
-              ? `${scenes.length} cenas · todas já aprovadas`
-              : `${scenesToGenerate} de ${scenes.length} cenas a gerar · ${estimatedSeconds} s de vídeo`}
-          </span>
-          <button
-            disabled={working}
-            onClick={() => {
-              const message =
-                scenesToGenerate === 0
-                  ? null
-                  : `Serão geradas ${scenesToGenerate} de ${scenes.length} cenas (${estimatedSeconds} s de vídeo), o que consome crédito do provedor. Cenas já aprovadas serão mantidas. Continuar?`;
-              if (message && !confirm(message)) return;
-              void run(() => api(`/api/projects/${project.id}/generate`, { method: "POST", body: {} }));
-            }}
-          >
-            {scenesToGenerate === 0 ? "Ir para a revisão" : "Aprovar roteiro e gerar cenas"}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-```
 
 - [ ] **Step 7: Painel de cenas (geração e revisão)**
 
@@ -2894,6 +2460,8 @@ Run: `pnpm typecheck && pnpm build`
 
 Expected: typecheck limpo; `next build` termina com a lista de rotas, incluindo `/`, `/login`, `/projects/[id]` e as rotas `/api/**` (todas dinâmicas `ƒ`). Se o build tentar conectar ao banco ou exigir variáveis de ambiente, é sinal de que algo chama `getContext()` no topo de um módulo: mover a chamada para dentro do handler.
 
+> **Fase B1 do redesenho (stepper, briefing, personagens e roteiro):** os componentes desses passos foram redesenhados sem mudar chamadas à API, transições, polling nem o lock de `run()`; o plano aponta para os arquivos do repositório. O `ScenesPanel` e o `DonePanel` ficam para a Fase B2 (só a troca de `confirm()` pelo diálogo, feita antes).
+
 - [ ] **Step 10: Rodar a suíte completa**
 
 Run: `pnpm test`
@@ -2999,6 +2567,31 @@ export function AlertIcon({ className = "icon" }: IconProps) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7.5v5.5M12 16.5v.01" />
+    </svg>
+  );
+}
+
+export function CheckIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </svg>
+  );
+}
+
+export function LockIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="5" y="10.5" width="14" height="10" rx="2" />
+      <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3" />
+    </svg>
+  );
+}
+
+export function PlusIcon({ className = "icon" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <path d="M12 5v14M5 12h14" />
     </svg>
   );
 }
