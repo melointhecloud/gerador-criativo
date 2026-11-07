@@ -23,7 +23,7 @@
 | `package.json`, `tsconfig.json`, `vitest.config.ts`, `.gitignore`, `.env.example` | Tooling |
 | `docker-compose.yml`, `docker/init.sql` | Postgres local (dev em `gerador`, testes em `gerador_test`) |
 | `src/config/env.ts` | Parse e validação das variáveis de ambiente |
-| `scripts/spike-video.ts`, `docs/provider-spike.md` | Validação manual do provider de vídeo |
+| `scripts/spike-video.ts`, `scripts/spike-video/lib.ts`, `docs/provider-spike.md` | Validação manual do provider de vídeo |
 | `src/domain/stages.ts` | Etapas do projeto e transições permitidas (puro) |
 | `src/domain/script.ts` | Schema do roteiro e regra de limite de referências (puro) |
 | `src/db/schema.ts`, `client.ts`, `migrate.ts`, `drizzle.config.ts` | Tabelas, conexão, migrações |
@@ -347,152 +347,120 @@ git commit -m "feat(config): validate environment with zod"
 
 ### Task 3: Spike do provider de vídeo (manual, consome crédito)
 
-> **Por que existe:** a doc oficial do Gemini (`https://aistudio.google.com/docs/deprecations`, consultada em 2026-11-03) lista `veo-3.1-generate-preview` e variantes como **desligados em 22/10/2026**, com substituto `gemini-omni-1.1-flash` (Interactions API, 9:16 suportado, áudio gerado). A mesma doc diz que fala "é suportada ao estender vídeos gerados anteriormente (multi-turn)", o que pode inviabilizar UGC falando em uma única geração. Nada além desta task depende de resposta, pois o resto usa a interface `VideoModel` com fake. Mas o **provider real** (Plano 2, Task 11) só pode ser escrito depois dos resultados daqui.
+> **Por que existe:** a doc oficial do Gemini (`https://aistudio.google.com/docs/deprecations`, consultada em 2026-11-03 e de novo em 2026-11-07) lista `veo-3.1-generate-preview` e variantes como **desligados em 22/10/2026**. O substituto é o Gemini Omni (Interactions API, 9:16 suportado, áudio gerado). A doc do Omni (`https://aistudio.google.com/docs/omni`) diz que fala "é suportada ao estender vídeos gerados anteriormente (multi-turn)", o que pode inviabilizar UGC falando em uma única geração. Nada além desta task depende de resposta, pois o resto usa a interface `VideoModel` com fake. Mas o **provider real** (Plano 2, Task 11) só pode ser escrito depois dos resultados daqui.
+>
+> **NUNCA rode a execução real sem autorização explícita do dono da chave.** Ela gasta crédito (sem free tier; ~US$ 0,10/s em 720p no `gemini-omni-1.1-flash`, ~US$ 1,60 pelas 2 gerações de 8s). Rode uma vez só. O script se recusa a enviar sem `SPIKE_CONFIRM=sim` na linha de comando e tem `--dry-run` sem custo.
+>
+> **Revisado em 2026-11-07 contra a doc e o SDK `@google/genai` 2.32** (o rascunho original nunca rodou). Principais correções: tags `<IMAGE_REF_N>` estão obsoletas na doc, então as referências são descritas em linguagem natural; os retries automáticos do SDK (até 4 em 408/409/429/5xx) ficam desligados, porque cada retry seria outra geração paga; `ai.interactions.create` é tipado no SDK, então o cast saiu; `response_format.duration` ("3s" a "15s") passa a ser explícito; o teste B virou uma cena de novelinha com dois personagens. Lista completa em `docs/provider-spike.md`. **Observação:** `gemini-omni-1.2-flash` saiu em 2026-11-05 e o 1.1 desliga em 2026-12-03, quando as chamadas passam automaticamente para o 1.2. Trocar o padrão é decisão do Lucas.
 
 **Files:**
-- Create: `scripts/spike-video.ts`, `docs/provider-spike.md`
+- Create: `scripts/spike-video/lib.ts` (lógica pura e orquestração com `Deps`, testável sem rede)
+- Create: `scripts/spike-video.ts` (entrada: liga o SDK, `ffprobe` e o sistema de arquivos à lib)
+- Create: `tests/scripts/spike-video.test.ts` (só deps falsos, nunca rede)
+- Create: `docs/provider-spike.md` (modelo "NÃO PREENCHIDO" até a execução autorizada)
 
-- [ ] **Step 1: Criar `scripts/spike-video.ts`**
+- [x] **Step 1: Criar `scripts/spike-video/lib.ts` e os testes** — FEITO (2026-11-07). O código está no repositório; o contrato é:
+  - `parseConfig(env, argv, statFile)`: `--dry-run`/`SPIKE_DRY_RUN=1` dispensa a chave. Fora dele, falta de `GEMINI_API_KEY` dá erro em pt-BR. Modelo vem de `GEMINI_VIDEO_MODEL` (padrão `gemini-omni-1.1-flash`), a duração de `SPIKE_DURATION_SECONDS` (padrão 8, faixa 3–15) e o timeout total de `SPIKE_TIMEOUT_MINUTES` (padrão 20). `confirmed` só é verdadeiro com `SPIKE_CONFIRM === "sim"`. O teste B só roda com `REF_CHAR1` e `REF_CHAR2` (png/jpg/webp, existentes); se só uma for definida, dá erro.
+  - `buildRequest(gen, cfg, base64[])` devolve `{ model, input, response_format: { type: "video", aspect_ratio: "9:16", resolution: "720p", duration: "8s", delivery: "uri" }, automatic_continuation: false }`. O teste A usa só texto. No B, o `input` é `[image, image, text]`, com as imagens antes do texto e sem tags `<IMAGE_REF_N>`.
+  - O prompt B é uma cena curta de novelinha: "Rafael é o rapaz da primeira imagem de referência (...). Marina é a moça da segunda imagem de referência (...)", com uma fala de cada um em pt-BR, e pede que cada personagem mantenha a aparência da própria imagem.
+  - `runSpike(cfg, deps)` recusa rodar em dry-run ou sem confirmação. Lê as imagens antes da primeira chamada, faz no máximo 1 chamada por geração e para no primeiro erro (exceção, `status != completed`, `errors`, erro no `model_output` ou resposta sem vídeo), sem retry. Grava `<teste>.mp4` e `<teste>.json` (sem input e sem base64). Com `uri`, consulta `files.get` até `ACTIVE` e chama `files.download`; com `data`, grava direto. Se o download falhar, orienta a usar `interactions.get(id)` em vez de gerar de novo.
+  - `redact` tira a chave, `AIza...`, `key=` e `x-goog-api-key` de qualquer mensagem. `describeError` classifica 400 (inválida/segurança), 401/403, 404, 429 (cota), 5xx e timeout. Também há `parseProbe`, `formatResultsTable` e `preflightSummary` ("Serão feitas N gerações pagas").
+
+- [x] **Step 2: Criar a entrada `scripts/spike-video.ts`** — FEITO
 
 ```ts
+// Spike do provider de vídeo (Plano 1, Task 3). CONSOME CRÉDITO GEMINI quando roda de verdade.
 import { GoogleGenAI } from "@google/genai";
 import { execFile } from "node:child_process";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
-import path from "node:path";
+import { statSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { formatResultsTable, parseConfig, parseProbe, preflightSummary, redact, describeError, runSpike, buildRequest, describeRequest } from "./spike-video/lib";
 
 const run = promisify(execFile);
-const apiKey = process.env.GEMINI_API_KEY;
-const model = process.env.GEMINI_VIDEO_MODEL ?? "gemini-omni-1.1-flash";
-if (!apiKey) throw new Error("Defina GEMINI_API_KEY");
 
-const ai = new GoogleGenAI({ apiKey });
-// A superfície de Interactions é tipada de forma diferente entre versões do SDK; este cast isola isso.
-const client = ai as unknown as {
-  interactions: { create(req: unknown): Promise<{ output_video?: { uri?: string; data?: string } }> };
-  files: {
-    get(a: { name: string }): Promise<{ state?: string }>;
-    download(a: { file: string; downloadPath: string }): Promise<void>;
-  };
-};
-
-const outDir = path.resolve("spike-out");
-
-async function generate(label: string, input: unknown) {
-  const t0 = Date.now();
-  const interaction = await client.interactions.create({
-    model,
-    input,
-    response_format: { type: "video", aspect_ratio: "9:16", resolution: "720p", delivery: "uri" },
+async function main(): Promise<number> {
+  const parsed = parseConfig(process.env, process.argv.slice(2), (p) => statSync(p).size);
+  if (!parsed.ok) {
+    console.error(`Erro: ${parsed.error}`);
+    return 1;
+  }
+  const cfg = parsed.config;
+  console.log(preflightSummary(cfg));
+  if (cfg.dryRun) {
+    for (const gen of cfg.generations) {
+      const fakeData = gen.images.map((img) => "x".repeat(Math.ceil(img.bytes / 3) * 4));
+      console.log(`\n--- Corpo de interactions.create para ${gen.label} ---\n${describeRequest(buildRequest(gen, cfg, fakeData))}`);
+    }
+    console.log("\nDRY-RUN: nenhuma chamada foi feita e nada foi gravado.");
+    return 0;
+  }
+  if (!cfg.confirmed) {
+    console.error("\nNada foi enviado. ... repita com SPIKE_CONFIRM=sim na linha de comando (não coloque essa variável no .env).");
+    return 2;
+  }
+  const ai = new GoogleGenAI({ apiKey: cfg.apiKey });
+  setTimeout(() => process.exit(3), cfg.timeoutMs + 60_000).unref(); // rede de segurança do timeout total
+  const results = await runSpike(cfg, {
+    createInteraction: async (req, { timeoutMs }) =>
+      ai.interactions.create(req, { timeout_ms: timeoutMs, retries: { strategy: "none" } }), // sem retry: cada retry seria outra geração paga
+    getFileState: async (name) => (await ai.files.get({ name })).state,
+    downloadFile: (name, dest) => ai.files.download({ file: name, downloadPath: dest }),
+    readFile: (p) => readFile(p),
+    writeFile: (p, data) => writeFile(p, data),
+    mkdir: async (p) => { await mkdir(p, { recursive: true }); },
+    probe: async (file) => {
+      try {
+        const { stdout } = await run("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file]);
+        return parseProbe(stdout);
+      } catch (e) {
+        console.error(`ffprobe falhou em ${file}: ${describeError(e)}`);
+        return undefined;
+      }
+    },
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    log: (m) => console.log(m),
   });
-  const uri = interaction.output_video?.uri;
-  const id = uri?.match(/files\/([a-zA-Z0-9]+)/)?.[1];
-  if (!id) throw new Error(`[${label}] sem arquivo de vídeo na resposta: ${JSON.stringify(interaction)}`);
-  const name = `files/${id}`;
-  for (;;) {
-    const info = await client.files.get({ name });
-    if (info.state === "ACTIVE") break;
-    if (info.state === "FAILED") throw new Error(`[${label}] geração falhou`);
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-  const file = path.join(outDir, `${label}.mp4`);
-  await client.files.download({ file: name, downloadPath: file });
-  const { stdout } = await run("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file]);
-  const probe = JSON.parse(stdout) as {
-    format: { duration: string };
-    streams: { codec_type: string; width?: number; height?: number }[];
-  };
-  const v = probe.streams.find((s) => s.codec_type === "video");
-  console.log(
-    `[${label}] ${((Date.now() - t0) / 1000).toFixed(0)}s de espera | duração ${Number(probe.format.duration).toFixed(2)}s | ` +
-      `${v?.width}x${v?.height} | áudio: ${probe.streams.some((s) => s.codec_type === "audio")} | ${file}`,
-  );
+  console.log(`\n${formatResultsTable(results)}`);
+  const failed = results.some((r) => r.error) || results.length < cfg.generations.length;
+  return failed ? 1 : 0;
 }
 
-async function main() {
-  await mkdir(outDir, { recursive: true });
-
-  // A: texto puro, fala em pt-BR numa única geração (Gate 1 e 2)
-  await generate(
-    "A-texto-fala",
-    "Vídeo vertical estilo UGC, filmado com celular. Uma mulher de 30 anos, em uma cozinha clara, olha para a câmera e diz em português do Brasil, com voz natural: \"Eu testei esse produto por uma semana e não acredito no resultado.\"",
-  );
-
-  // B: duas imagens de referência (Gate 3). Passe os caminhos em REF_PERSON e REF_PRODUCT.
-  const personPath = process.env.REF_PERSON;
-  const productPath = process.env.REF_PRODUCT;
-  if (personPath && productPath) {
-    const img = async (p: string) => ({
-      type: "image",
-      data: (await readFile(p)).toString("base64"),
-      mime_type: p.endsWith(".png") ? "image/png" : "image/jpeg",
-    });
-    await generate("B-referencias", [
-      {
-        type: "text",
-        text:
-          "Vídeo vertical estilo UGC. A pessoa de <IMAGE_REF_1> segura o produto de <IMAGE_REF_2>, olha para a câmera e diz em português do Brasil: \"Olha só o que chegou hoje.\" Mantenha exatamente a aparência da pessoa e do produto.",
-      },
-      await img(personPath),
-      await img(productPath),
-    ]);
-  } else {
-    console.log("[B] pulado: defina REF_PERSON e REF_PRODUCT (caminhos de imagem)");
-  }
-  await writeFile(path.join(outDir, "done.txt"), new Date().toISOString());
-}
-
-main().catch((e) => {
-  console.error(e);
+main().then((code) => process.exit(code), (e) => {
+  console.error(redact(`Erro inesperado: ${describeError(e)}`, [process.env.GEMINI_API_KEY]));
   process.exit(1);
 });
 ```
 
-- [ ] **Step 2: Rodar o spike (consome crédito; 2 gerações)**
-
-Run:
+Verificação sem custo: `pnpm typecheck`, `pnpm vitest run tests/scripts`, e:
 ```bash
-GEMINI_API_KEY=<sua-chave> REF_PERSON=<foto-pessoa.jpg> REF_PRODUCT=<foto-produto.jpg> pnpm spike:video
-```
-Expected: duas linhas `[A-texto-fala] ...` e `[B-referencias] ...` com duração, resolução e `áudio: true`. Os MP4 ficam em `spike-out/` (ignorado pelo git). Se o SDK rejeitar o formato de `input` ou `response_format`, consultar `https://aistudio.google.com/docs/omni`, corrigir o script e registrar a forma correta em `docs/provider-spike.md`: o Plano 2 reaproveita exatamente essa forma.
-
-- [ ] **Step 3: Assistir os dois vídeos e registrar em `docs/provider-spike.md`**
-
-Criar o arquivo com este conteúdo, preenchendo cada campo com o que foi observado:
-
-```markdown
-# Spike do provider de vídeo
-
-Data: <data da execução>
-Modelo: <GEMINI_VIDEO_MODEL usado>
-Chamada que funcionou: <formato de input/response_format que o SDK aceitou>
-
-## Resultados
-- Duração de um clipe gerado (A): <s>   (B): <s>
-- Tempo de espera até ACTIVE (A): <s>   (B): <s>
-- Resolução recebida: <WxH>
-- Tem faixa de áudio: <sim/não>
-
-## Gates
-- [ ] Gate 1: saída vertical 9:16 com áudio
-- [ ] Gate 2: a mulher **fala a frase em pt-BR** numa única geração (sem extensão)
-- [ ] Gate 3: com 2 imagens de referência, pessoa e produto reconhecíveis no vídeo
-- [ ] Gate 4: duração do clipe definida (usar como `SCENE_MAX_SECONDS`)
-
-## Decisão
-<Gates 1-4 passaram → seguir com Omni como definido no Plano 2, Task 11.>
-<Gate 2 falhou → PARAR. Avisar o dono do projeto. Alternativas: (a) fluxo de extensão multi-turn do Omni para dar fala, (b) Veo 3.1 GA na Gemini Enterprise Agent Platform (Vertex). Só o provider de vídeo muda; o resto do plano segue igual.>
-<Gate 3 falhou parcialmente → registrar quantas referências funcionam bem e ajustar `MAX_SCENE_REFERENCES`.>
-
-## Valores para o .env
-MAX_SCENE_REFERENCES=<n>
-SCENE_MAX_SECONDS=<n>
+env -u GEMINI_API_KEY node_modules/.bin/tsx scripts/spike-video.ts            # erro em pt-BR, exit 1
+REF_CHAR1=spike-out/personagem1-esquerda.png REF_CHAR2=spike-out/personagem2-direita.png pnpm spike:video --dry-run
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Rodar o spike (SÓ COM AUTORIZAÇÃO; consome crédito; 2 gerações)**
+
+Primeiro o dry-run acima. Depois, com o "pode rodar" explícito do dono da chave:
+```bash
+SPIKE_CONFIRM=sim REF_CHAR1=spike-out/personagem1-esquerda.png REF_CHAR2=spike-out/personagem2-direita.png pnpm spike:video
+```
+A chave vem do `.env` (via `--env-file-if-exists`) e nunca é impressa. Expected: a tabela com `A-texto-fala` e `B-novelinha-referencias`, com duração, resolução, `9:16 = sim` e `Áudio = sim`. Os MP4 e os `.json` ficam em `spike-out/` (ignorado pelo git). **Se der erro, não rode de novo:** registre o motivo impresso em `docs/provider-spike.md` e decida com o dono da chave. Se a API rejeitar o formato de `input` ou `response_format`, corrija a lib e o teste, registre a forma correta em `docs/provider-spike.md` (o Plano 2 reaproveita exatamente essa forma) e peça nova autorização antes de rodar de novo.
+
+- [ ] **Step 4: Assistir aos dois vídeos e preencher `docs/provider-spike.md`**
+
+O modelo já existe (marcado "NÃO PREENCHIDO"). Preencha Data, Modelo, Chamada que funcionou, Resultados (cole a tabela) e os gates:
+- Gate 1: saída vertical 9:16 com áudio;
+- Gate 2: no A, a mulher **fala a frase em pt-BR** numa única geração (sem extensão); no B, Rafael e Marina falam uma frase cada;
+- Gate 3: com 2 imagens de referência de personagens, **cada pessoa continua reconhecível** no vídeo, e os dois não trocam de aparência;
+- Gate 4: duração entregue igual à pedida, o que define `SCENE_MAX_SECONDS` (a doc aceita até 15s).
+
+Decisão: se o Gate 2 falhar, **PARAR** e avisar o Lucas. As alternativas são (a) o fluxo de extensão multi-turn do Omni ou (b) o Veo 3.1 GA na Vertex; não escolha sozinho. Se o Gate 3 falhar de forma que inviabilize a novelinha, PARAR também. Se falhar parcialmente, ajuste `MAX_SCENE_REFERENCES` (a doc limita a 2 personagens, até 3 imagens cada, por requisição).
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add scripts docs/provider-spike.md
+git add docs/provider-spike.md   # e scripts/ ou tests/ se precisaram de correção
 git commit -m "docs: record video provider spike results"
 ```
 
