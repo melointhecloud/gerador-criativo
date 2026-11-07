@@ -22,4 +22,12 @@ describe("confirmTexts", () => {
     expect(confirmTexts.removeReference(null).title).toBe("Remover a referência “sem rótulo”?");
     expect(confirmTexts.removeCharacter("Marina").body).toBe("As cenas que o usam vão avisar que perderam a referência.");
   });
+  it("salvar uma nova aparência avisa do custo e da aprovação perdida", () => {
+    const t = confirmTexts.saveCharacterAppearance("Marina");
+    expect(t.body).toBe(
+      "Salvar a nova descrição de “Marina” gera uma nova imagem (usa o provedor de imagens e pode custar créditos) e remove a aprovação atual.",
+    );
+    expect(t.confirmLabel).toBe("Salvar e gerar nova imagem");
+    expect(t.tone).toBe("primary");
+  });
 });

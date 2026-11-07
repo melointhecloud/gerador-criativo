@@ -2,7 +2,8 @@
 import { useId, useState } from "react";
 import { api } from "@/lib/api";
 import { confirmTexts } from "@/lib/confirmTexts";
-import { characterActions, isDirty } from "@/lib/flow";
+import { isTextDirty } from "@/lib/dirty";
+import { characterActions } from "@/lib/flow";
 import type { PanelProps, ProjectView } from "@/lib/types";
 import { useConfirm } from "./ConfirmDialog";
 import { AlertIcon, CheckIcon, PlusIcon } from "./icons";
@@ -59,8 +60,9 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
     setDescription(c.description);
   }
   const confirm = useConfirm();
-  const dirty = isDirty({ name: c.name, description: c.description }, { name, description });
-  const descriptionChanged = description !== c.description;
+  // O servidor guarda o texto sem espaços nas pontas: só diferença real conta como alteração.
+  const descriptionChanged = isTextDirty(description, c.description);
+  const dirty = isTextDirty(name, c.name) || descriptionChanged;
   const actions = characterActions(c, dirty, working);
   const reasonId = `${uid}-motivo`;
 
@@ -91,7 +93,11 @@ function CharacterCard({ c, run, working }: Pick<PanelProps, "run" | "working"> 
           <button
             type="button"
             disabled={working}
-            onClick={() => void run(() => api(`/api/characters/${c.id}`, { method: "PATCH", body: { name, description } }))}
+            onClick={async () => {
+              // Mudar a aparência faz o servidor gerar outra imagem (custo): confirma antes.
+              if (descriptionChanged && !(await confirm(confirmTexts.saveCharacterAppearance(c.name)))) return;
+              void run(() => api(`/api/characters/${c.id}`, { method: "PATCH", body: { name, description } }));
+            }}
           >
             Salvar
           </button>

@@ -2,7 +2,7 @@
 import { useId, useState } from "react";
 import { api } from "@/lib/api";
 import { confirmTexts, generateScenesLabel } from "@/lib/confirmTexts";
-import { isDirty } from "@/lib/flow";
+import { isTextDirty } from "@/lib/dirty";
 import type { PanelProps, ProjectView } from "@/lib/types";
 import { useConfirm } from "./ConfirmDialog";
 import { UnsavedBadge } from "./UnsavedBadge";
@@ -14,10 +14,8 @@ function SceneEditor({ scene, index, run, working }: Pick<PanelProps, "run" | "w
   const [dialogue, setDialogue] = useState(scene.dialogue);
   const [visualPrompt, setVisualPrompt] = useState(scene.visualPrompt);
   const [seconds, setSeconds] = useState(String(scene.targetSeconds));
-  const dirty = isDirty(
-    { dialogue: scene.dialogue, visualPrompt: scene.visualPrompt, seconds: scene.targetSeconds },
-    { dialogue, visualPrompt, seconds: Number(seconds) },
-  );
+  // O servidor tira os espaços das pontas da fala e da descrição visual.
+  const dirty = isTextDirty(dialogue, scene.dialogue) || isTextDirty(visualPrompt, scene.visualPrompt) || Number(seconds) !== scene.targetSeconds;
   const n = index + 1;
 
   return (

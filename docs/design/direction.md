@@ -298,7 +298,7 @@ Selos de etapa seguem as duas temperaturas: etapas em que a pessoa trabalha (Bri
 - Botões dizem a ação e o objeto: "Criar e abrir o briefing", "Aprovar esta versão", "Baixar MP4". Nada de "OK", "Enviar" genérico quando houver um verbo melhor. Nada de "→" no texto do botão.
 - O verbo se mantém no fluxo: "Aprovar" → selo "Aprovada"; "Montar vídeo final" → etapa "Montando".
 - Erros dizem o que aconteceu e o que fazer, sem pedir desculpas: "Sem conexão com o servidor. Verifique a internet e tente de novo."
-- Ações pagas mostram o custo antes (número de cenas e segundos de vídeo) e pedem confirmação explícita; o texto atual dos `confirm()` é mantido palavra por palavra.
+- Ações pagas mostram o custo antes (número de cenas e segundos de vídeo) e pedem confirmação explícita; o texto atual dos `confirm()` é mantido palavra por palavra. Também pede confirmação "Salvar" de um personagem cuja aparência mudou (gera nova imagem e tira a aprovação); salvar só o nome não pergunta.
 - Metadados separados por espaço e rótulo, não por "·".
 
 ## 9. Revisão do plano contra os padrões genéricos

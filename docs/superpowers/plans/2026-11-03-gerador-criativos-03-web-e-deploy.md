@@ -2224,6 +2224,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 Arquivos novos da Fase B1 (código completo no repositório):
 
 - `src/lib/stepper.ts`: modelo puro da linha do tempo (`buildStepper`, `backLockReason`). Mesma regra de antes: voltar só para etapas editáveis e nunca durante `generating`/`assembling` nem na revisão com `hasPendingGenerations`; avançar só pelas ações de cada painel. Testes em `tests/lib/stepper.test.ts` (inclui "toda etapa disponível é uma transição que `canTransition` aceita").
+- `src/lib/dirty.ts`: `normalizeText`/`isTextDirty` (comparação sem espaços nas pontas). Testes em `tests/lib/dirty.test.ts`.
 - `src/lib/flow.ts`: funções puras das telas (`isDirty`, `formatCharCount`, `characterActions`, `progressMessage`, `guardedDestination`). Testes em `tests/lib/flow.test.ts`.
 - `src/lib/useUnsavedGuard.ts`: aviso de alterações não salvas no briefing (`beforeunload` + interceptação de links internos com o diálogo de confirmação); os ouvintes só existem enquanto há edição pendente. Sem salvamento automático e sem chamadas novas à API.
 - `src/components/StageTimeline.tsx`: a régua de etapas (`<nav aria-label="Etapas do projeto">` com `<ol>`), estados atual/concluída/disponível/travada/futura e os motivos escritos abaixo da régua.
@@ -2237,7 +2238,7 @@ Arquivos novos da Fase B1 (código completo no repositório):
 
 - [ ] **Step 5: Painel de personagens**
 
-`src/components/CharactersPanel.tsx`: código completo no repositório. Cartões com a imagem 9:16 no palco e os estados "Gerando imagem…" (barra em Luz do dia) e "Falhou: …"; selo só da aprovação. Correções: a `key` do `CharacterCard` é só o `id` (antes incluía `assetId` e remontava o cartão, perdendo texto não salvo, quando uma imagem terminava) e o formulário volta aos valores do servidor só quando o nome/aparência salvos mudam; "Aprovar" e "Regerar imagem" ficam desabilitados enquanto há edição não salva, com o motivo (`characterActions`); confirmação antes de "Regerar imagem", "Adicionar personagem" e do primeiro "Sugerir personagens" (textos em `src/lib/confirmTexts.ts`).
+`src/components/CharactersPanel.tsx`: código completo no repositório. Cartões com a imagem 9:16 no palco e os estados "Gerando imagem…" (barra em Luz do dia) e "Falhou: …"; selo só da aprovação. Correções: a `key` do `CharacterCard` é só o `id` (antes incluía `assetId` e remontava o cartão, perdendo texto não salvo, quando uma imagem terminava) e o formulário volta aos valores do servidor só quando o nome/aparência salvos mudam; "Aprovar" e "Regerar imagem" ficam desabilitados enquanto há edição não salva, com o motivo (`characterActions`); confirmação antes de "Regerar imagem", "Adicionar personagem", do primeiro "Sugerir personagens" e de "Salvar" quando a aparência mudou (o servidor gera outra imagem; `saveCharacterAppearance`; salvar só o nome não pergunta) (textos em `src/lib/confirmTexts.ts`). "Alterações não salvas" compara valores sem espaços nas pontas (`src/lib/dirty.ts`, `isTextDirty`), como o servidor guarda: nome/aparência, nome do briefing, fala e descrição visual das cenas; a copy do briefing é comparada crua.
 
 
 - [ ] **Step 6: Painel de roteiro**

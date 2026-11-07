@@ -54,6 +54,12 @@ export const confirmTexts = {
     confirmLabel: "Regerar imagem",
     tone: "primary",
   }),
+  saveCharacterAppearance: (name: string): ConfirmRequest => ({
+    title: `Salvar a nova aparência de “${name}”?`,
+    body: `Salvar a nova descrição de “${name}” gera uma nova imagem (usa o provedor de imagens e pode custar créditos) e remove a aprovação atual.`,
+    confirmLabel: "Salvar e gerar nova imagem",
+    tone: "primary",
+  }),
   addCharacter: (name: string): ConfirmRequest => ({
     title: `Adicionar o personagem “${name}”?`,
     body: `A ferramenta gera uma imagem para o novo personagem. ${IMAGE_COST}`,

@@ -2,7 +2,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { confirmTexts } from "@/lib/confirmTexts";
-import { formatCharCount, isDirty } from "@/lib/flow";
+import { isTextDirty } from "@/lib/dirty";
+import { formatCharCount } from "@/lib/flow";
 import type { PanelProps } from "@/lib/types";
 import { useUnsavedGuard } from "@/lib/useUnsavedGuard";
 import { useConfirm } from "./ConfirmDialog";
@@ -28,7 +29,8 @@ export function BriefingPanel({ snap, run, working }: PanelProps) {
   const continueLabel = isUgc ? "Continuar para o roteiro" : "Continuar para os personagens";
 
   // Nome e copy só são salvos em "Continuar…" (como antes): avisa antes de sair da tela sem salvar.
-  const dirty = isDirty({ name: project.name, copy: project.copy }, { name, copy });
+  // O servidor tira os espaços das pontas só do nome; a copy é guardada como veio.
+  const dirty = isTextDirty(name, project.name) || copy !== project.copy;
   useUnsavedGuard(dirty, () => confirm(confirmTexts.discardBriefing(continueLabel)));
 
   // Prévia local do arquivo escolhido (URL blob:, nada sai do navegador antes de enviar).
