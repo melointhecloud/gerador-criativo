@@ -54,6 +54,7 @@ Mais um vermelho funcional, **Corte** `#FF7A85`, só para erro e ação destruti
 | `--color-progress-soft` | `#1F2B38` | Fundo de selo de processamento |
 | `--color-success` | `#6CCB8F` | Aprovado / pronto |
 | `--color-success-soft` | `#1F3328` | Fundo de selo de sucesso |
+| `--color-success-ink` | `#1F6B3D` | Visto de aprovado sobre Papel (segmento escolhido) |
 | `--color-danger` | `#FF7A85` | Erro, ação destrutiva |
 | `--color-danger-soft` | `#3B2327` | Fundo de alerta de erro |
 | `--color-focus` | `#FFB35C` | Anel de foco (2 px sólido + 2 px de afastamento) |
@@ -82,6 +83,11 @@ Mais um vermelho funcional, **Corte** `#FF7A85`, só para erro e ação destruti
 | border-control sobre Console / surface | 4,05 / 3,58 | UI 3,0 |
 | Foco (Tungstênio) sobre Console / surface / Palco | 9,51 / 8,42 / 11,85 | UI 3,0 |
 | text-disabled sobre surface | 3,78 | (isento; ainda legível) |
+| accent-contrast sobre Papel (segmento de versão escolhido) | 14,23 | texto 4,5 |
+| success-ink `#1F6B3D` sobre Papel (visto da versão aprovada no segmento escolhido) | 5,49 | UI 3,0 |
+| text-disabled sobre field (segmento sem vídeo) | 4,54 | (isento) |
+| Luz do dia / Corte / text-muted sobre Palco (estado escrito no palco) | 11,05 / 8,37 / 9,06 | texto 4,5 |
+| Papel sobre danger-soft (falha da tentativa) | 12,18 | texto 4,5 |
 
 `--color-border` (1,7–2,0:1) é usado só em divisórias e contornos de painel, que não carregam informação; controles usam `--color-border-control`.
 
@@ -111,7 +117,7 @@ Mais um vermelho funcional, **Corte** `#FF7A85`, só para erro e ação destruti
 - Coluna de conteúdo com `max-width: 1120px` e margens de 16 px (mobile) a 32 px (desktop). Texto sempre alinhado à esquerda; só a mídia é centralizada dentro do seu palco.
 - Ritmo de espaçamento em múltiplos de 4: 4, 8, 12, 16, 24, 32, 48, 64.
 - Raio de borda por hierarquia: painel 12 px, controles 8 px, selos 4 px, mídia 6 px. Sem sombras: a elevação vem da luminosidade (console → surface → surface-raised), como em editores de vídeo.
-- **Mídia 9:16:** sempre `aspect-ratio: 9 / 16`, `object-fit: contain` sobre `--color-stage`. O palco reserva o espaço antes de o vídeo carregar (sem salto de layout). Larguras: 280 px na revisão, até 360 px no vídeo final, 100% da coluna no celular (limitado a 70% da altura da tela).
+- **Mídia 9:16:** sempre `aspect-ratio: 9 / 16`, `object-fit: contain` sobre `--color-stage`. O palco reserva o espaço antes de o vídeo carregar (sem salto de layout). Larguras: 280 px na revisão, grade de no mínimo 220 px na geração, até 360 px no vídeo final, 100% da coluna no celular (limitado a 70% da altura da tela).
 
 ### Wireframes (desktop)
 
@@ -208,25 +214,45 @@ ROTEIRO
 | 3 de 3 cenas a gerar  18 s de vídeo          [Aprovar roteiro e gerar cenas]   |
 +--------------------------------------------------------------------------------+
 
-GERAÇÃO / REVISÃO
+GERAÇÃO (contato das cenas em grade)
 +--------------------------------------------------------------------------------+
 | (cabeçalho do projeto + linha do tempo)                                        |
-| 2 de 4 cenas aprovadas            [Regerar todas]  [Montar vídeo final]  (fixo)|
+| +----------------------------------------------------------------------------+ |
+| | 1 de 3 cenas prontas   (aria-live)                                         | |
+| | [■■■■■■■■□□□□□□□□]  <progress>     A tela muda sozinha para a revisão...   | |
+| +----------------------------------------------------------------------------+ |
+| +-----------+  +-----------+  +-----------+                                    |
+| | ▯ clipe   |  | ▯ gerando |  | ▯ na fila |                                    |
+| | Cena 1    |  | Cena 2    |  | Cena 3    |                                    |
+| | [Pronta]  |  | [Gerando…]|  | [Na fila] |                                    |
+| | 3 s       |  | Gerando   |  | Na fila   |                                    |
+| |           |  | desde 9:27|  | desde 9:27|                                    |
+| |           |  | ━━━ barra |  | ─── fixa  |                                    |
+| +-----------+  +-----------+  +-----------+                                    |
++--------------------------------------------------------------------------------+
+
+REVISÃO
++--------------------------------------------------------------------------------+
+| (cabeçalho do projeto + linha do tempo)                                        |
+| [! A montagem falhou: ...]  (só quando o último job de montagem falhou)        |
 | +------------------------------------------------------------------------+     |
-| | ⌜‾‾‾‾‾‾‾‾⌝  Cena 1                                [Aprovada] [Pronta]  |     |
+| | ⌜‾‾‾‾‾‾‾‾⌝  Cena 1                                         [Pronta]   |     |
 | | |  9:16  |  “Fala da cena entre aspas...”                              |     |
-| | | palco  |  Versões  [v1] [v2]                                         |     |
-| | |  preto |  [Aprovar esta versão] [Ajustar prompt] [Regerar]           |     |
-| | ⌞________⌟                                                             |     |
+| | | palco  |  3 s   No palco: versão 2 (5 de nov. 14:32)                 |     |
+| | |  preto |  Versões [v1 ✓ 5 nov 14:20 | v2 5 nov 14:32]  (segmentado)  |     |
+| | ⌞________⌟  [Aprovar esta versão] [Ajustar prompt] [Regerar]           |     |
 | +------------------------------------------------------------------------+     |
-| | Cena 2 (gerando: palco com barra de progresso em Luz do dia)           |     |
+| | Cena 2 ...  (cantos só na próxima cena que depende de você)            |     |
+| +------------------------------------------------------------------------+     |
+| 2 de 4 cenas aprovadas  Aprove todas... faltam 2 cenas. [Regerar todas] [Montar]|
+|                                              (fixa no pé da tela no desktop)   |
 +--------------------------------------------------------------------------------+
 
 VÍDEO FINAL
 +--------------------------------------------------------------------------------+
 | (cabeçalho do projeto + linha do tempo, tudo concluído)                        |
 |         ⌜‾‾‾‾‾‾‾‾‾‾‾‾⌝      Vídeo final                                        |
-|         |            |      18,4 s   720×1280   MP4                            |
+|         |            |      Duração 18,4 s   Cenas 4   Formato MP4 720×1280   |
 |         |   9:16     |                                                       |
 |         |   player   |      [Baixar MP4]                                     |
 |         |            |      [Voltar para a revisão]                          |
@@ -313,6 +339,8 @@ O primeiro rascunho, e o que mudou:
 6. **Ousadia em um lugar só: o enquadramento 9:16.** Cantos de visor (marcas de enquadramento em Tungstênio) aparecem só em volta do que é protagonista na tela: o formulário do login, o convite da lista vazia e, na Fase B, o palco do clipe em revisão e o vídeo final. O medidor 9:16 de cada projeto na lista é a versão miniatura do mesmo quadro. O resto fica quieto.
 7. **Espelho (tirar um acessório).** Depois das primeiras capturas: (a) saiu o sublinhado em tungstênio do item "Projetos" no cabeçalho (competia com as marcas de enquadramento e com a ação principal; o item atual agora só fica em Papel com peso 600); (b) o botão principal desabilitado deixou de ser um tungstênio translúcido (parecia quebrado) e virou neutro.
 8. **Espelho na Fase B1 (stepper, briefing, personagens, roteiro).** Depois das capturas: (a) saiu o cadeado repetido nas linhas de motivo abaixo da régua (o segmento já tem o cadeado; três cadeados e mais dois nas notas viravam ruído); (b) o cartão de personagem deixou de mostrar o selo "Gerando imagem"/"Imagem falhou", que repetia o texto já escrito sobre a imagem: o selo agora só diz a aprovação ("Para aprovar"/"Aprovado"); (c) a imagem antiga fica apagada (20%) enquanto gera de novo ou depois de falhar, porque o texto em Corte sobre uma imagem vermelha ficava ilegível; (d) os botões do cartão ficaram no tamanho compacto (36 px) para não empilhar um por linha na coluna de 250 px.
+
+9. **Espelho na Fase B2 (geração, revisão, final).** Depois das capturas: (a) o cabeçalho do cartão deixou de repetir "Aprovada" quando a versão no palco é a aprovada (o selo "Versão aprovada" junto das ações e o visto no segmento já dizem; vendo outra versão, o cabeçalho volta a lembrar que a cena segue aprovada); (b) "Pronta" na revisão usa um olho em Tungstênio (sua vez de assistir), não o visto verde, que confundia com "Aprovada"; (c) os cantos de visor saíram de "cena com a versão mais recente pronta" para "primeira cena sem aprovação e sem geração em andamento", porque uma cena que falhou também depende de você; (d) sem versão para aprovar, o botão "Aprovar" desabilitado sumiu e "Regerar" virou a ação principal; (e) a tela "Montando" deixou de repetir o título ("Montando", "Montando o vídeo final…", "Montando…" no palco): o palco reservado mostra só a barra, e o texto diz quantas cenas estão sendo juntadas.
 
 ## 10. Melhorias de usabilidade para a Fase B
 

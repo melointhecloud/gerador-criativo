@@ -10,7 +10,7 @@ import { useProject } from "@/lib/useProject";
 import { BriefingPanel } from "./BriefingPanel";
 import { CharactersPanel } from "./CharactersPanel";
 import { ConfirmProvider } from "./ConfirmDialog";
-import { DonePanel } from "./DonePanel";
+import { AssemblingPanel, DonePanel } from "./DonePanel";
 import { AlertIcon } from "./icons";
 import { ScenesPanel } from "./ScenesPanel";
 import { ScriptPanel } from "./ScriptPanel";
@@ -141,12 +141,7 @@ function ProjectScreen({ id }: { id: string }) {
         {(project.stage === "generating" || project.stage === "review") && (
           <ScenesPanel snap={snap} run={run} working={working} />
         )}
-        {project.stage === "assembling" && (
-          <div className="panel work-panel stack stack-sm">
-            <p>Montando o vídeo final… isso leva alguns segundos.</p>
-            <div className="progress-bar" aria-hidden="true" />
-          </div>
-        )}
+        {project.stage === "assembling" && <AssemblingPanel snap={snap} />}
         {project.stage === "done" && <DonePanel snap={snap} run={run} working={working} />}
       </section>
 
