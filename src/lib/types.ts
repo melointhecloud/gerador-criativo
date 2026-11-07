@@ -1,6 +1,6 @@
 import type { Snapshot } from "@/services/projects";
 
-// Resposta de GET /api/projects/:id. As datas chegam como string (JSON), mas a UI não as usa.
+// Resposta de GET /api/projects/:id. As datas chegam como string (JSON); a UI as formata (hora das versões, “na fila desde”) a partir dessas strings.
 export type ProjectView = Snapshot & {
   estimatedSeconds: number; // segundos que a próxima geração vai custar (só cenas sem aprovação)
   scenesToGenerate: number;

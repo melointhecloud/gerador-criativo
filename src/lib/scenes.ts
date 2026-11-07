@@ -147,6 +147,7 @@ export type SceneCardModel<A extends AttemptLike> = {
   approved: boolean; // a versão no palco é a aprovada
   badges: SceneBadge[];
   failure: string | null; // frase da falha/bloqueio da tentativa mais recente
+  pendingNote: string | null; // "Gerando a versão 2…" quando há versão aprovada e uma nova geração em andamento
   since: string | null; // "Gerando desde 14:35"
   versions: VersionView[]; // vazio com uma só tentativa
   canApprove: boolean;
@@ -154,13 +155,17 @@ export type SceneCardModel<A extends AttemptLike> = {
   promptSeed: string; // texto inicial do "Ajustar prompt"
 };
 
-// Selos do cabeçalho do cartão. "Aprovada" vale para a cena; o estado da tentativa mais recente só aparece
-// quando diz algo a mais (uma cena aprovada com a versão mais recente pronta mostra só "Aprovada").
-// Na revisão, "Pronta" sem aprovação é a sua vez (tungstênio); na geração, é a máquina que terminou (verde).
+// Selos do cabeçalho do cartão. Com uma versão aprovada, o selo da cena é só "Aprovada": é a versão aprovada que
+// será usada na montagem, mesmo que uma tentativa mais nova esteja gerando, tenha falhado ou sido bloqueada (isso
+// aparece na nota da cena e no seletor de versões, ver pendingNote/failureText). Sem aprovação, o selo mostra o
+// estado da tentativa mais recente. (O contador da geração é outra conta: countScenes.) Na revisão, "Pronta" sem aprovação é a sua vez (tungstênio); na geração, é a máquina que terminou (verde).
 export function sceneBadges(scene: { approvedAttemptId: string | null }, latest: AttemptLike | undefined, reviewing: boolean): SceneBadge[] {
   const badges: SceneBadge[] = [];
-  if (scene.approvedAttemptId) badges.push({ key: "approved", label: "Aprovada", tone: "done" });
-  if (latest && !(latest.status === "done" && scene.approvedAttemptId)) {
+  if (scene.approvedAttemptId) {
+    badges.push({ key: "approved", label: "Aprovada", tone: "done" });
+    return badges;
+  }
+  if (latest) {
     const s = ATTEMPT_STATUS[latest.status];
     badges.push({ key: latest.status, label: s.label, tone: latest.status === "done" && reviewing ? "you" : s.tone });
   }
@@ -172,6 +177,13 @@ export function failureText(latest: AttemptLike | undefined, attemptCount: numbe
   const reason = latest.error?.trim() || "o provedor não informou o motivo.";
   const what = attemptCount > 1 ? `A versão ${attemptCount}` : "A geração";
   return latest.status === "blocked" ? `${what} foi bloqueada: ${reason}` : `${what} falhou: ${reason}`;
+}
+
+export function pendingNote(scene: { approvedAttemptId: string | null }, latest: AttemptLike | undefined, attemptCount: number): string | null {
+  if (!scene.approvedAttemptId || !latest || !isPending(latest.status)) return null;
+  return latest.status === "queued"
+    ? `A versão ${attemptCount} está na fila. A versão aprovada continua valendo.`
+    : `Gerando a versão ${attemptCount}… A versão aprovada continua valendo.`;
 }
 
 export function sceneCardModel<A extends AttemptLike>(
@@ -210,9 +222,12 @@ export function sceneCardModel<A extends AttemptLike>(
     failed,
     approved,
     // Na revisão, a versão no palco aprovada já mostra o selo "Versão aprovada" junto das ações: o cabeçalho
-    // não repete (espelho da Fase B2). Vendo outra versão, o cabeçalho lembra que a cena segue aprovada.
-    badges: sceneBadges(scene, latest, reviewing).filter((b) => !(reviewing && approved && b.key === "approved")),
+    // não repete (espelho da Fase B2), salvo quando existe uma tentativa mais nova gerando, com falha ou bloqueada: aí o cabeçalho mantém "Aprovada". Vendo outra versão, ele lembra que a cena segue aprovada.
+    badges: sceneBadges(scene, latest, reviewing).filter(
+      (b) => !(reviewing && approved && b.key === "approved" && !isPending(latest?.status) && !isFailure(latest?.status)),
+    ),
     failure: failureText(latest, attempts.length),
+    pendingNote: pendingNote(scene, latest, attempts.length),
     since: pendingSince(latest),
     versions,
     canApprove: !working && Boolean(shown) && shown!.status === "done" && !approved,

@@ -130,11 +130,37 @@ describe("selos, falha, tempo e próxima cena", () => {
   it("aprovada mostra só 'Aprovada' quando a versão mais recente está pronta", () => {
     const v1 = attempt("done");
     expect(sceneBadges({ approvedAttemptId: v1.id }, v1, true).map((b) => b.label)).toEqual(["Aprovada"]);
-    // aprovou a v1 enquanto a v2 gera: os dois selos
-    expect(sceneBadges({ approvedAttemptId: v1.id }, attempt("generating"), true).map((b) => b.label)).toEqual([
-      "Aprovada",
-      "Gerando…",
-    ]);
+  });
+  it("com versão aprovada, o selo da cena é 'Aprovada' mesmo com tentativa nova falha, bloqueada ou gerando", () => {
+    const v1 = attempt("done");
+    for (const s of ["failed", "blocked", "generating", "queued"] as const) {
+      expect(sceneBadges({ approvedAttemptId: v1.id }, attempt(s), true)).toEqual([{ key: "approved", label: "Aprovada", tone: "done" }]);
+    }
+  });
+  it("aprovada v1 + v2 falhou: selo Aprovada no cabeçalho e a falha segue na nota", () => {
+    const v1 = attempt("done");
+    const v2 = attempt("failed", { error: "Quota esgotada" });
+    const m = sceneCardModel(scene([v1, v2], v1.id), null, false);
+    expect(m.badges.map((b) => b.label)).toEqual(["Aprovada"]);
+    expect(m.failure).toBe("A versão 2 falhou: Quota esgotada");
+    expect(m.pendingNote).toBeNull();
+    expect(m.approved).toBe(true);
+  });
+  it("aprovada v1 + v2 gerando: selo Aprovada e nota 'Gerando a versão 2…'", () => {
+    const v1 = attempt("done");
+    const v2 = attempt("generating");
+    const m = sceneCardModel(scene([v1, v2], v1.id), null, false);
+    expect(m.badges.map((b) => b.label)).toEqual(["Aprovada"]);
+    expect(m.pendingNote).toBe("Gerando a versão 2… A versão aprovada continua valendo.");
+    expect(sceneCardModel(scene([v1, attempt("queued")], v1.id), null, false).pendingNote).toContain("na fila");
+    expect(sceneCardModel(scene([v1, v2]), null, false).pendingNote).toBeNull();
+  });
+  it("sem aprovação, a última falha vira o selo 'Falhou'; o contador da geração segue a tentativa mais recente", () => {
+    const v1 = attempt("done");
+    const v2 = attempt("failed");
+    expect(sceneBadges({ approvedAttemptId: null }, v2, true).map((b) => b.label)).toEqual(["Falhou"]);
+    const c = countScenes([scene([v1, v2], v1.id), scene([attempt("done")])]);
+    expect([c.ready, c.approved, c.failed]).toEqual([1, 1, 1]);
   });
   it("'Pronta' sem aprovação é a sua vez na revisão e verde na geração", () => {
     const v1 = attempt("done");

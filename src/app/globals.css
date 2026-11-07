@@ -47,6 +47,7 @@
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
+  --review-bar-clearance: 96px; /* barra de ações da revisão (78 px medidos) + distância do rodapé (12 px) + folga */
   --space-5: 24px;
   --space-6: 32px;
   --space-7: 48px;
@@ -886,6 +887,8 @@ progress.meter-bar::-moz-progress-bar { border-radius: 3px; background: var(--co
 .review-count { font-weight: 600; }
 @media (min-width: 720px) {
   .review-bar { position: sticky; bottom: var(--space-3); z-index: 5; border-color: var(--color-border-control); }
+  /* A barra fixa cobriria o controle que recebe o foco por Tab (WCAG 2.4.11): reserva a altura dela mais a distância do rodapé. */
+  html { scroll-padding-bottom: var(--review-bar-clearance); }
 }
 @media (max-width: 559px) {
   .action-bar-actions { width: 100%; }

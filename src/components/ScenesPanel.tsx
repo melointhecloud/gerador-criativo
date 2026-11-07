@@ -1,5 +1,5 @@
 "use client";
-import { useId, useState, type ComponentType, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type ComponentType, type KeyboardEvent } from "react";
 import { api } from "@/lib/api";
 import { confirmTexts } from "@/lib/confirmTexts";
 import {
@@ -130,6 +130,24 @@ function SceneCard({
   const m = sceneCardModel(scene, selectedId, working, reviewing);
   const n = index + 1;
   const promptId = `${uid}-prompt`;
+  // Durante o pedido (`working`) os botões ficam desabilitados e o foco cairia no <body>. Quem agiu pelo teclado
+  // (ou clicou) volta para um alvo estável do mesmo cartão quando o pedido termina; nunca no primeiro
+  // carregamento, em consultas periódicas ou com o foco em outro lugar (só se o foco estava no botão ao clicar).
+  const approveRef = useRef<HTMLButtonElement>(null);
+  const regenerateRef = useRef<HTMLButtonElement>(null);
+  const approvedBadgeRef = useRef<HTMLSpanElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const restoreFocus = useRef<"approve" | "regenerate" | null>(null);
+  useEffect(() => {
+    const what = restoreFocus.current;
+    if (!what || working) return;
+    restoreFocus.current = null;
+    const target =
+      what === "approve"
+        ? (approvedBadgeRef.current ?? approveRef.current)
+        : (regenerateRef.current && !regenerateRef.current.disabled ? regenerateRef.current : headingRef.current);
+    target?.focus({ preventScroll: true });
+  }, [working]);
   const regeneratePrimary = m.failed && !m.shown; // sem versão para aprovar: "Regerar" é a ação principal
 
   return (
@@ -137,7 +155,9 @@ function SceneCard({
       <TakeStage m={m} framed={framed} />
       <div className="take-body">
         <div className="take-head">
-          <h3 id={`${uid}-titulo`}>Cena {n}</h3>
+          <h3 id={`${uid}-titulo`} ref={headingRef} tabIndex={-1}>
+            Cena {n}
+          </h3>
           <span className="take-badges">
             {m.badges.map((b) => (
               <Badge key={b.key} b={b} />
@@ -158,6 +178,7 @@ function SceneCard({
         </p>
         {m.pending && <div className={`progress-bar${m.latest?.status === "queued" ? " is-static" : ""}`} aria-hidden="true" />}
         {scene.notice && <p className="notice">{scene.notice}</p>}
+        {m.pendingNote && <p className="notice">{m.pendingNote}</p>}
         {m.failure && (
           <div className="take-failure">
             {m.latest?.status === "blocked" ? <BlockIcon /> : <AlertIcon />}
@@ -174,15 +195,19 @@ function SceneCard({
           <>
             <div className="take-actions">
               {m.approved ? (
-                <span className="badge badge-done badge-lg">
+                <span className="badge badge-done badge-lg" ref={approvedBadgeRef} tabIndex={-1}>
                   <CheckIcon />
                   Versão aprovada
                 </span>
               ) : !m.shown ? null : (
                 <button
                   type="button"
+                  ref={approveRef}
                   disabled={!m.canApprove}
-                  onClick={() => void run(() => api(`/api/scenes/${scene.id}/approve`, { body: { attemptId: m.shown!.id } }))}
+                  onClick={() => {
+                    if (document.activeElement === approveRef.current) restoreFocus.current = "approve";
+                    void run(() => api(`/api/scenes/${scene.id}/approve`, { body: { attemptId: m.shown!.id } }));
+                  }}
                 >
                   Aprovar esta versão
                 </button>
@@ -202,10 +227,12 @@ function SceneCard({
               </button>
               <button
                 type="button"
+                ref={regenerateRef}
                 className={regeneratePrimary ? undefined : "secondary"}
                 disabled={!m.canRegenerate}
                 onClick={async () => {
                   if (!(await confirm(confirmTexts.regenerateScene(n, editing)))) return;
+                  if (document.activeElement === regenerateRef.current) restoreFocus.current = "regenerate";
                   void run(async () => {
                     await api(`/api/scenes/${scene.id}/regenerate`, { body: editing ? { prompt } : {} });
                     setSelectedId(null);
@@ -246,7 +273,7 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
     <div className={`stack stack-lg takes-panel${reviewing ? " is-review" : " is-generating"}`}>
       {!reviewing && (
         <div className="panel gen-status">
-          <p className="gen-count tabular" aria-live="polite">
+          <p className="gen-count tabular">
             {readyText(counts)}
           </p>
           <progress className="meter-bar" max={counts.total} value={counts.ready} aria-label="Cenas prontas" />
@@ -270,7 +297,7 @@ export function ScenesPanel({ snap, run, working }: PanelProps) {
       {reviewing && (
         <div className="action-bar review-bar">
           <div className="action-bar-status">
-            <p className="tabular review-count" aria-live="polite">
+            <p className="tabular review-count">
               {approvedText(counts)}
             </p>
             {assemble.reason && (

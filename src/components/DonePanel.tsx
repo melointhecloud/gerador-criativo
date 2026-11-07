@@ -19,7 +19,7 @@ export function AssemblingPanel({ snap }: Pick<PanelProps, "snap">) {
         </div>
       </div>
       <div className="final-info">
-        <p className="final-lead" role="status">
+        <p className="final-lead">
           Juntando {n === 1 ? "1 cena aprovada" : `${n} cenas aprovadas`} em um MP4. Isso leva alguns segundos.
         </p>
         <p className="hint">Você pode sair desta página: a montagem continua.</p>
