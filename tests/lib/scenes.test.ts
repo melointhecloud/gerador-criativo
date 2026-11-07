@@ -99,7 +99,7 @@ describe("sceneCardModel", () => {
     const m = sceneCardModel(scene([v1, v2]), null, false);
     expect(m.badges).toEqual([{ key: "blocked", label: "Bloqueada", tone: "bad" }]);
     expect(m.failed).toBe(true);
-    expect(m.failure).toBe("A versão 2 foi bloqueada: Conteúdo bloqueado");
+    expect(m.failure).toBe("A versão 2 foi bloqueada: Conteúdo bloqueado.");
     expect(m.shown).toBe(v1); // a versão antiga pronta continua no palco
   });
   it("aprovar: só versão pronta, ainda não aprovada, sem pedido em andamento", () => {
@@ -142,7 +142,7 @@ describe("selos, falha, tempo e próxima cena", () => {
     const v2 = attempt("failed", { error: "Quota esgotada" });
     const m = sceneCardModel(scene([v1, v2], v1.id), null, false);
     expect(m.badges.map((b) => b.label)).toEqual(["Aprovada"]);
-    expect(m.failure).toBe("A versão 2 falhou: Quota esgotada");
+    expect(m.failure).toBe("A versão 2 falhou: Quota esgotada.");
     expect(m.pendingNote).toBeNull();
     expect(m.approved).toBe(true);
   });
@@ -175,7 +175,9 @@ describe("selos, falha, tempo e próxima cena", () => {
     expect(sceneCardModel(scene([v1], v1.id), null, false, false).badges.map((b) => b.label)).toEqual(["Aprovada"]);
   });
   it("frase da falha com a mensagem do provedor (ou um texto quando não há)", () => {
-    expect(failureText(attempt("failed", { error: "Tempo esgotado" }), 1)).toBe("A geração falhou: Tempo esgotado");
+    expect(failureText(attempt("failed", { error: "Tempo esgotado" }), 1)).toBe("A geração falhou: Tempo esgotado.");
+    expect(failureText(attempt("failed", { error: "Tempo esgotado." }), 2)).toBe("A versão 2 falhou: Tempo esgotado.");
+    expect(failureText(attempt("blocked", { error: "Conteúdo bloqueado" }), 2)).toBe("A versão 2 foi bloqueada: Conteúdo bloqueado.");
     expect(failureText(attempt("blocked"), 1)).toBe("A geração foi bloqueada: o provedor não informou o motivo.");
     expect(failureText(attempt("done"), 1)).toBeNull();
   });

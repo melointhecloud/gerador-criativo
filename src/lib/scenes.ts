@@ -2,6 +2,8 @@
 // Só descreve o que a tela mostra: as regras de habilitar/desabilitar são as mesmas do ScenesPanel antes do
 // redesenho (Fase B2, docs/design/direction.md) e as do servidor (src/services/scenes.ts).
 
+import { endSentence } from "@/lib/text";
+
 export type AttemptStatus = "queued" | "generating" | "done" | "failed" | "blocked";
 export type AttemptLike = {
   id: string;
@@ -176,7 +178,7 @@ export function failureText(latest: AttemptLike | undefined, attemptCount: numbe
   if (!latest || !isFailure(latest.status)) return null;
   const reason = latest.error?.trim() || "o provedor não informou o motivo.";
   const what = attemptCount > 1 ? `A versão ${attemptCount}` : "A geração";
-  return latest.status === "blocked" ? `${what} foi bloqueada: ${reason}` : `${what} falhou: ${reason}`;
+  return latest.status === "blocked" ? `${what} foi bloqueada: ${endSentence(reason)}` : `${what} falhou: ${endSentence(reason)}`;
 }
 
 export function pendingNote(scene: { approvedAttemptId: string | null }, latest: AttemptLike | undefined, attemptCount: number): string | null {
