@@ -7,3 +7,10 @@ spike-out/
 *.tsbuildinfo
 next-env.d.ts
 .superpowers/
+
+# criativos gerados no Flow (mídia pesada; roteiro/briefing/prompts ficam versionados)
+criativos/**/*.mp4
+criativos/**/*.png
+criativos/**/*.jpg
+criativos/**/*.jpeg
+criativos/**/*.webp
