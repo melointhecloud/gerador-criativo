@@ -6,13 +6,15 @@
       "id": "marina",
       "nome": "Marina",
       "descricao": "mulher brasileira de cerca de 38 anos, cabelo castanho ondulado até os ombros, pele morena clara, olhos castanhos, camiseta cinza larga, expressão cansada",
-      "imagem": "personagens/marina.png"
+      "imagem": "personagens/marina.png",
+      "flowRef": "Woman with tired expression#1"
     },
     {
       "id": "carla",
       "nome": "Carla",
       "descricao": "mulher brasileira de cerca de 40 anos, cabelo preto liso em corte chanel, pele parda, blusa vermelha, sorriso aberto e olhar animado",
-      "imagem": "personagens/carla.png"
+      "imagem": "personagens/carla.png",
+      "flowRef": "Woman smiling in red blouse#1"
     }
   ],
   "cenas": [
@@ -21,7 +23,9 @@
       "segundos": 8,
       "fala": "Eu juro que tentei de tudo. Hoje a calça nem fecha mais.",
       "acao": "Quarto, manhã, luz natural da janela. Plano médio de Marina diante do espelho de corpo inteiro, tentando fechar o botão de uma calça jeans. Ela desiste, solta o ar e olha o próprio reflexo, frustrada, e fala olhando para o espelho.",
-      "personagens": ["marina"],
+      "personagens": [
+        "marina"
+      ],
       "keyframeInicio": null,
       "keyframeFim": null
     },
@@ -30,7 +34,10 @@
       "segundos": 8,
       "fala": "CARLA: Mari, prova esse shake da Lumi. Eu tomo todo dia no café. MARINA: Mais uma dessas modinhas, Carla?",
       "acao": "Cozinha clara, manhã. Carla entrega a Marina um copo de shake de chocolate e sorri, animada. Marina segura o copo desconfiada, cruza os braços com a outra mão e ergue a sobrancelha. Plano médio das duas, câmera estável, dois falantes em sequência.",
-      "personagens": ["carla", "marina"],
+      "personagens": [
+        "carla",
+        "marina"
+      ],
       "keyframeInicio": null,
       "keyframeFim": null
     },
@@ -39,7 +46,9 @@
       "segundos": 8,
       "fala": "Não é milagre, mas pela primeira vez eu consegui manter a rotina.",
       "acao": "A mesma cozinha, tempo depois, luz dourada de fim de tarde. Close-up de Marina, mais leve e sorridente, segurando o copo de shake. Ela fala direto para a câmera, como num depoimento, e termina com um sorriso discreto.",
-      "personagens": ["marina"],
+      "personagens": [
+        "marina"
+      ],
       "keyframeInicio": null,
       "keyframeFim": null
     }

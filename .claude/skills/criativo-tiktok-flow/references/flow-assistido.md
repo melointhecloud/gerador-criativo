@@ -29,6 +29,16 @@ Usado e aprovado em 2026-11-19 (3 cenas de novelinha, fala pt-BR e lip sync ok).
 6. **Links:** clicar na miniatura abre `/edit/<id>`; a URL é o link da saída. Voltar (`navigate back`) e abrir a outra.
 7. **Saldo:** avatar → "N créditos do Google Flow".
 
+## Economia de contexto (decidido em 2026-11-24)
+
+O custo vem do contexto relido a cada chamada (ver `docs/CUSTOS-CLAUDE-CODE.md`). Por isso:
+
+1. **Lotes de até 6 cenas por sessão.** Ao fechar o lote, grave em `notas.md` do criativo: links das saídas, créditos gastos, saldo, próxima cena e config do seletor. Avise o usuário para abrir sessão nova e retomar por esse arquivo.
+2. **Enfileire a cena N+1 enquanto a N renderiza** (as cenas são independentes). Só aguarde quando não houver mais nada a enviar.
+3. **Agrupe cliques e esperas** na mesma chamada sempre que a posição já for conhecida.
+4. **Screenshot só para decidir onde clicar ou conferir a prévia de referência.** Para ler custo, saldo e URLs, prefira o texto da página.
+5. **Não releia arquivos grandes** da skill dentro do lote; leia `prompts/cena-NN.txt` só da cena atual.
+
 ## Dicas de interface
 
 - A tela mexe de posição quando o aviso azul de retenção some: tire screenshot antes de clicar por coordenada.

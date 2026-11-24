@@ -12,6 +12,8 @@ Claude faz o trabalho de texto e de organização: briefing, roteiro, prompts, c
 - **Manual (padrão):** o usuário gera no Flow e baixa os arquivos para a pasta do criativo. Claude não clica em "gerar".
 - **Assistido (só quando o usuário pedir):** Claude opera o Flow pelo Chrome na conta logada do usuário. Siga `references/flow-assistido.md`.
 
+- **Script (padrão para gerar, depois que o usuário aprovar o custo):** `scripts/flow/flow.mjs criativo <pasta> --projeto <url> --sim [--baixar]` gera todas as cenas do roteiro em sequência, coleta os links, baixa se o usuário autorizou e retoma de onde parou. Abre o Chrome sozinho. Quase não gasta contexto do Claude. Siga `references/flow-script.md`. Se o script falhar, caia para o assistido.
+
 Nunca gere vídeo por API paga.
 
 Princípio: **tudo que é imagem é grátis no Flow, vídeo custa crédito.** Por isso a consistência se resolve em imagem (personagens e keyframes) antes de gastar um crédito de vídeo.
@@ -44,7 +46,7 @@ cenas/                 cena-NN.mp4, só as aprovadas
 3. **Roteiro.** Divida a copy em cenas. Itere em linguagem natural até aprovar. Grave `roteiro.json`.
 4. **Keyframes.** Um prompt de imagem por cena (início, e fim quando a cena tem muita ação). Usuário gera no Flow usando os personagens como referência, baixa para `keyframes/`, aprova a sequência inteira antes de qualquer vídeo.
 5. **Prompts de vídeo + custo.** Um `prompts/cena-NN.txt` por cena, mais a estimativa de créditos. Aguarde o ok.
-6. **Geração no Flow.** Manual: entregue o passo a passo curto de `references/flow.md` e a ordem das cenas; o usuário gera, escolhe a melhor das 2 saídas e baixa como `cenas/cena-NN.mp4`. Assistido: gere as cenas pelo Chrome, entregue os links das 2 saídas de cada cena e peça a escolha. Baixe só com ok explícito.
+6. **Geração no Flow.** Preferido: modo script (`references/flow-script.md`): peça a URL do projeto do Flow, preencha o `flowRef` dos personagens no `roteiro.json` (liste com `flow.mjs imagens` e confira a foto com `enviar --dry-run`), rode o plano (sem `--sim`), mostre o custo, e com o ok rode com `--sim` (e `--baixar` se autorizado), em lotes de até 6 cenas. Manual: entregue o passo a passo curto de `references/flow.md` e a ordem das cenas; o usuário gera, escolhe a melhor das 2 saídas e baixa como `cenas/cena-NN.mp4`. Assistido: gere as cenas pelo Chrome, entregue os links das 2 saídas de cada cena e peça a escolha. Baixe só com ok explícito.
 7. **Checagem.** Rode `scripts/checar-cenas.sh criativos/<pasta>`. Reporte o que falta, o que não é 9:16, o que está sem áudio ou com duração fora do planejado. Cena ruim volta ao passo 5 (ajuste o prompt, não repita igual).
 8. **Fechamento.** Com todas as cenas aprovadas, resuma o que ficou pronto. A edição (legenda, efeitos, montagem) usa as skills de edição locais, ainda não integradas: não improvise montagem aqui.
 

@@ -24,8 +24,24 @@ for cmd in ffmpeg ffprobe jq column awk; do
   fi
 done
 
+echo "1b) Modo script (gera as cenas sozinho no Flow)"
+if command -v node >/dev/null 2>&1; then
+  nv=$(node -p "process.versions.node.split('.')[0]")
+  if (( nv >= 18 )); then ok "node v$(node -v | tr -d v)"; else falta "node muito antigo (v$nv)" "Instale o Node.js LTS em https://nodejs.org (versão 18 ou maior)."; fi
+else
+  falta "node" "Instale o Node.js LTS em https://nodejs.org (baixe o instalador, avance até o fim e reabra o terminal)."
+fi
+if [[ -d "$aqui/flow/node_modules/playwright-core" ]]; then ok "dependências do script (npm install)"; else
+  falta "dependências do script" "Rode: cd .claude/skills/criativo-tiktok-flow/scripts/flow && npm install"
+fi
+if command -v node >/dev/null 2>&1 && [[ -d "$aqui/flow/node_modules/playwright-core" ]]; then
+  if node "$aqui/flow/flow.mjs" chrome >/dev/null 2>&1; then ok "Google Chrome encontrado"; else
+    falta "Google Chrome" "Instale em https://www.google.com/chrome (o script abre o Chrome sozinho)."
+  fi
+fi
+
 echo "2) Arquivos da skill"
-for f in SKILL.md references/flow.md references/prompts.md references/flow-assistido.md scripts/estimar-creditos.sh scripts/checar-cenas.sh; do
+for f in SKILL.md references/flow.md references/prompts.md references/flow-assistido.md references/flow-script.md scripts/estimar-creditos.sh scripts/checar-cenas.sh scripts/flow/flow.mjs scripts/flow/package.json; do
   [[ -f "$aqui/../$f" ]] && ok "$f" || falta "$f" "Arquivo ausente: confira se o clone está completo (git status)."
 done
 [[ -f "$exemplo/roteiro.json" ]] && ok "criativo de exemplo" || falta "criativo de exemplo" "Esperado em $exemplo"
@@ -46,7 +62,8 @@ fi
 
 echo
 echo "4) Passos manuais (o script não consegue conferir)"
-echo "   - Estar logado em https://flow.google.com com a conta que vai gastar os créditos."
+echo "   - Entrar na conta do Flow UMA vez no Chrome do script:  node .claude/skills/criativo-tiktok-flow/scripts/flow/flow.mjs login"
+echo "     (abre uma janela do Chrome; entre com a conta Google que vai gastar os créditos; o login fica salvo)."
 echo "   - Ver o saldo: avatar no canto superior direito do Flow."
 echo "   - Modo assistido (opcional): extensão Claude in Chrome conectada ao Claude Code."
 

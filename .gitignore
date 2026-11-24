@@ -14,3 +14,6 @@ criativos/**/*.png
 criativos/**/*.jpg
 criativos/**/*.jpeg
 criativos/**/*.webp
+
+# estado local do modo script (links do Flow e progresso por máquina)
+criativos/**/flow-estado.json
