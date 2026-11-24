@@ -80,7 +80,7 @@ Todo o resto roda com providers falsos (`PROVIDER=fake`), sem custo.
 - Nunca commitar `.env`, chaves, senhas ou arquivos de `storage-data/` ou `spike-out/` (já estão no `.gitignore`).
 - Segredos só em variáveis de ambiente (`.env` local, variáveis do Railway em produção).
 - Todo endpoint e todo arquivo servido exigem a sessão (cookie assinado); não criar rota pública.
-- O repositório é privado. Não torná-lo público nem adicionar colaboradores sem o Lucas.
+- **O repositório está público desde 2026-11-24** (decisão do Lucas, "por enquanto", para os sócios clonarem sem convite). Por isso: nada de chaves, senhas, links de projetos do Flow nem dados de clientes/ofertas reais em arquivos versionados (`flow-estado.json` e vídeos já estão no `.gitignore`). Voltar a privado ou adicionar colaboradores só com o Lucas.
 
 ## Convenções de código
 
