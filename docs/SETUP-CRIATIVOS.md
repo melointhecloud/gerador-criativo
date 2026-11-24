@@ -13,7 +13,7 @@ Duas coisas custam dinheiro/limite, e o Claude **sempre mostra o custo e pede o 
 ## 1. O que você precisa ter
 
 - [ ] **Computador** com Windows 10/11, macOS ou Linux.
-- [ ] **Acesso ao repositório no GitHub** (peça ao Lucas para te adicionar; use a mesma conta do GitHub que você vai usar no computador).
+- [ ] **O link do repositório** (por enquanto ele é público: não precisa de conta no GitHub nem de convite).
 - [ ] **Claude**, em um destes formatos (qualquer um serve):
   - **Claude Desktop**, na aba **Code** (https://claude.com/download), ou
   - **VS Code** com a extensão **Claude Code**, ou
@@ -64,7 +64,7 @@ git clone https://github.com/melointhecloud/gerador-criativo.git
 cd gerador-criativo
 ```
 
-Na primeira vez o Git vai abrir uma janela para você **entrar no GitHub**: entre com a conta que o Lucas autorizou. Se aparecer "repository not found", é porque o acesso ainda não foi liberado: peça ao Lucas.
+Não precisa entrar no GitHub. Se aparecer "repository not found", o Lucas pode ter voltado o repositório para privado: peça a ele o acesso.
 
 ## 4. Abrir no Claude
 
@@ -122,7 +122,7 @@ O fluxo, com **a sua aprovação em cada etapa**:
 
 ## Regras do time
 
-- **Nunca** coloque no Git chaves, senhas, o `.env` ou vídeos (já estão no `.gitignore`). Não torne o repositório público nem passe o link para quem não é do time.
+- O repositório está **público por enquanto** (o Lucas decide quando voltar a privado). Por isso **nunca** coloque no Git chaves, senhas, o `.env`, vídeos, links de projetos do Flow nem dados de clientes ou ofertas reais (o `.gitignore` já cobre vídeos e o estado do script). Não passe o link para quem não é do time.
 - Não rode nada em massa e não gere vários criativos ao mesmo tempo na mesma conta: o ritmo normal (uma cena por vez) é o que o script faz.
 - O Claude nunca gasta créditos sem mostrar o valor e receber o seu ok. Se ele pedir para gastar mais do que você esperava, **recuse e pergunte**.
 - Depois de baixar o projeto, puxe as novidades de tempos em tempos com `git pull` (o Lucas melhora a ferramenta).
