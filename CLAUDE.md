@@ -15,6 +15,7 @@ Ferramenta interna, para 2–3 pessoas, que gera criativos em vídeo para TikTok
 Por causa do custo da API (~R$ 5 por segundo de vídeo), o Lucas pausou o SaaS descrito abaixo e adotou uma **skill local** que gera pelo Google Flow (assinatura com créditos). A skill está em `.claude/skills/criativo-tiktok-flow/` e foi validada com um teste de 3 cenas de novelinha (fala em pt-BR, lip sync e rosto aprovados pelo Lucas).
 
 - **Quem clonou agora:** rode `/setup-criativos` (guia em `docs/SETUP-CRIATIVOS.md`).
+- **Modo script (2026-11-24):** `scripts/flow/flow.mjs criativo <pasta> --projeto <url> --sim` gera todas as cenas pelo Chrome (Playwright via CDP), coleta links, baixa com `--baixar` e retoma por `flow-estado.json`. Guia: `.claude/skills/criativo-tiktok-flow/references/flow-script.md`. Setup para o time: `docs/SETUP-CRIATIVOS.md`.
 - **Regras da skill:** vídeo sempre em x2; imagens são grátis no Flow; mostrar os créditos antes de gerar; download só com ok do usuário.
 - **Custos:** Flow em `.claude/skills/criativo-tiktok-flow/references/flow.md`; Claude Code em `docs/CUSTOS-CLAUDE-CODE.md`.
 - **SaaS:** as branches `plano-2-pipeline` e `plano-3-web-deploy` ficam congeladas como alternativa. As seções abaixo descrevem esse SaaS e **não são o caminho atual** (a decisão "Omni via API" está suspensa).

@@ -25,3 +25,14 @@
   - saída 2: https://flow.google.com/project/043603e1-8973-4039-a947-3747b2e2bdad/edit/3074c0c9-a239-4622-9109-3acd184aa124
 - Saldo final: **106 créditos** (250 - 3 x 48). Total gasto no teste: 144, igual à estimativa.
 - Claude viu só quadros parados: cenário e roupa da cozinha da cena 2 e da cena 3 parecem diferentes (cenário não persiste sem Frames). Fala, voz e sincronia das cenas 2 e 3: a avaliar pelo Lucas.
+
+
+## Cena 1 refeita pelo script (2026-11-24, `scripts/flow/flow.mjs`)
+
+- Mesmo prompt da cena 1 e Marina frontal (`Woman with tired expression#1`). 48 créditos (saldo 156 -> 108).
+- Título do Flow: "Woman struggling to button jeans".
+  - saída 1: https://flow.google.com/project/043603e1-8973-4039-a947-3747b2e2bdad/edit/5928ece7-ba62-454f-8763-71c57c0aa742
+  - saída 2: https://flow.google.com/project/043603e1-8973-4039-a947-3747b2e2bdad/edit/dff31e50-ac58-4ecf-b87d-03a9523e3d66
+- Não baixado: download só com ok do Lucas. Fala, lip sync e rosto: a avaliar pelo Lucas.
+
+- Cena 02 (script, 2026-11-24T03:50): 48 créditos. https://flow.google.com/project/043603e1-8973-4039-a947-3747b2e2bdad/edit/cea0dc83-9c93-4451-89ec-990189eee40f | https://flow.google.com/project/043603e1-8973-4039-a947-3747b2e2bdad/edit/f2b8a526-f91d-4db8-8944-17d3708957fa

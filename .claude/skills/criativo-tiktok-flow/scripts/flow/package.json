@@ -1,0 +1,7 @@
+{
+  "name": "flow-cli",
+  "private": true,
+  "type": "module",
+  "description": "Automação determinística do Google Flow via Chrome já logado (CDP)",
+  "dependencies": { "playwright-core": "1.56.1" }
+}
