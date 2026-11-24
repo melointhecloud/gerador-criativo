@@ -2,6 +2,10 @@
 
 Para quem acabou de receber o link do repositório. **Siga na ordem.** Leva de 20 a 30 minutos na primeira vez; depois, criar um criativo é só pedir ao Claude.
 
+## O jeito mais fácil
+
+Abra o Claude Code numa pasta qualquer e cole o texto que está no [README](../README.md#começar-2-minutos-sem-mexer-em-código). Ele baixa o projeto e faz o setup com você. Este guia é a versão manual, caso prefira ou algo trave.
+
 ## O que isto faz
 
 Você escreve (ou cola) a copy e o Claude monta o roteiro em cenas, escreve os prompts, **gera as cenas de vídeo no Google Flow** e entrega os arquivos MP4 verticais (9:16) na pasta `criativos/`. Funciona para **novelinha** (história com personagens) e **UGC** (pessoa falando para a câmera).
