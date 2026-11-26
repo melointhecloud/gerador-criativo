@@ -41,7 +41,7 @@ if command -v node >/dev/null 2>&1 && [[ -d "$aqui/flow/node_modules/playwright-
 fi
 
 echo "2) Arquivos da skill"
-for f in SKILL.md references/flow.md references/prompts.md references/flow-assistido.md references/flow-script.md scripts/estimar-creditos.sh scripts/checar-cenas.sh scripts/flow/flow.mjs scripts/flow/package.json; do
+for f in SKILL.md references/flow.md references/prompts.md references/flow-assistido.md references/flow-script.md references/grok-script.md scripts/estimar-creditos.sh scripts/checar-cenas.sh scripts/flow/flow.mjs scripts/flow/grok.mjs scripts/flow/package.json; do
   [[ -f "$aqui/../$f" ]] && ok "$f" || falta "$f" "Arquivo ausente: confira se o clone está completo (git status)."
 done
 [[ -f "$exemplo/roteiro.json" ]] && ok "criativo de exemplo" || falta "criativo de exemplo" "Esperado em $exemplo"
@@ -63,6 +63,7 @@ fi
 echo
 echo "4) Passos manuais (o script não consegue conferir)"
 echo "   - Entrar na conta do Flow UMA vez no Chrome do script:  node .claude/skills/criativo-tiktok-flow/scripts/flow/flow.mjs login"
+echo "   - Para gerar no Grok, entrar uma vez:  node .claude/skills/criativo-tiktok-flow/scripts/flow/grok.mjs login"
 echo "     (abre uma janela do Chrome; entre com a conta Google que vai gastar os créditos; o login fica salvo)."
 echo "   - Ver o saldo: avatar no canto superior direito do Flow."
 echo "   - Modo assistido (opcional): extensão Claude in Chrome conectada ao Claude Code."

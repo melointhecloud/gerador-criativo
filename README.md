@@ -26,7 +26,8 @@ O Claude **sempre mostra quantos créditos vai gastar e só gasta com o seu ok**
 ## Mais informações
 
 - Guia completo, passo a passo e problemas comuns: [docs/SETUP-CRIATIVOS.md](docs/SETUP-CRIATIVOS.md)
-- Como o Claude gera as cenas: [.claude/skills/criativo-tiktok-flow/references/flow-script.md](.claude/skills/criativo-tiktok-flow/references/flow-script.md)
+- Como o Claude gera as cenas no Flow: [.claude/skills/criativo-tiktok-flow/references/flow-script.md](.claude/skills/criativo-tiktok-flow/references/flow-script.md)
+- Como gerar as mesmas cenas no Grok Imagine: [.claude/skills/criativo-tiktok-flow/references/grok-script.md](.claude/skills/criativo-tiktok-flow/references/grok-script.md)
 - Custos (Flow e limite do Claude): [docs/CUSTOS-CLAUDE-CODE.md](docs/CUSTOS-CLAUDE-CODE.md)
 - Exemplo completo: [criativos/emagrecimento-teste-20261119/](criativos/emagrecimento-teste-20261119/)
 - Para quem desenvolve: [CLAUDE.md](CLAUDE.md)

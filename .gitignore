@@ -17,3 +17,4 @@ criativos/**/*.webp
 
 # estado local do modo script (links do Flow e progresso por máquina)
 criativos/**/flow-estado.json
+criativos/**/grok-estado.json
